@@ -1,60 +1,42 @@
-// קובץ: netlify/functions/check-status.js
+// netlify/functions/check-status.js
+// קוד זה מעביר את הבקשה כפי שהיא ל-Supabase Edge Function,
+// ומונע את ניסיון האימות מתוך ה-Proxy.
 
-// ה-URL של הפונקציה ב-Supabase שאנו מנסים להגיע אליה
-// ודא שאתה משתמש בכתובת החדשה: check-status-v2
-const SUPABASE_FUNCTION_URL = "https://rmgtegimphpjzxcflotn.supabase.co/functions/v1/check-status-v2";
+exports.handler = async (event) => {
+  if (event.httpMethod !== 'POST') {
+    return {
+      statusCode: 405,
+      body: 'Method Not Allowed'
+    };
+  }
 
-exports.handler = async (event, context) => {
-    // 1. טיפול ב-OPTIONS (חובה ל-CORS)
-    if (event.httpMethod === "OPTIONS") {
-        return {
-            statusCode: 200,
-            headers: {
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Headers": "Authorization, Content-Type",
-            },
-            body: "OK",
-        };
-    }
+  // 1. הגדרת ה-URL של הפונקציה ב-Supabase
+  // אנא ודא שה-URL הזה נכון! זהו ה-URL המקורי שלך.
+  const SUPABASE_FUNCTION_URL = 'https://rmgtegimphjpzxcflotn.supabase.co/functions/v1/check-status-v2';
 
-    try {
-        // 2. העברת הבקשה מ-Voiceflow ל-Supabase
-        
-        const headersToForward = {
-            "Content-Type": "application/json",
-            "Authorization": event.headers.authorization, // מעביר את ה-Bearer Token הלאה
-        };
-        
-        const bodyToForward = event.body;
+  // 2. העתקת כותרות הבקשה (כולל ה-Anon Key)
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': event.headers.authorization, // מעביר את ה-Bearer <Anon Key> כפי שהוא
+  };
 
-        // ביצוע בקשת POST ל-Supabase Edge Function
-        const response = await fetch(SUPABASE_FUNCTION_URL, {
-            method: "POST",
-            headers: headersToForward,
-            body: bodyToForward,
-        });
+  try {
+    const response = await fetch(SUPABASE_FUNCTION_URL, {
+      method: 'POST',
+      headers: headers,
+      body: event.body, // מעביר את גוף הבקשה (ה-JSON)
+    });
 
-        // 3. החזרת התגובה ל-Voiceflow
-        const data = await response.json();
+    const data = await response.json();
 
-        return {
-            statusCode: response.status,
-            headers: {
-                "Access-Control-Allow-Origin": "*", // מאפשר ל-Voiceflow לקרוא את התשובה
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify(data),
-        };
-        
-    } catch (error) {
-        console.error("Proxy error:", error);
-        return {
-            statusCode: 500,
-            headers: {
-                "Access-Control-Allow-Origin": "*",
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ status: "BLOCKED", error: "Proxy failed" }),
-        };
-    }
+    return {
+      statusCode: response.status,
+      body: JSON.stringify(data),
+    };
+  } catch (error) {
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: 'Proxy failed to connect to Supabase.', details: error.message }),
+    };
+  }
 };
