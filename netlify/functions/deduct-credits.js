@@ -77,13 +77,13 @@ exports.handler = async (event, context) => {
     
     // 1. === התיקון === קריאה מהטבלה הנכונה
     const { data: currentData, error: fetchError } = await supabase
-      .from('user_subscriptions') // <-- תוקן
+      .from('user_credits') // <-- תוקן
       .select('credits_remaining') // <-- תוקן
       .eq('user_id', user_id)
       .single();
     
     if (fetchError) {
-      console.error('Error fetching credits from user_subscriptions:', fetchError.message);
+      console.error('Error fetching credits from user_credits:', fetchError.message);
       throw new Error(`Failed to fetch credits: ${fetchError.message}`);
     }
 
@@ -117,13 +117,13 @@ exports.handler = async (event, context) => {
     
     // 2. === התיקון === עדכון בטבלה הנכונה
     const { data: updateData, error: updateError } = await supabase
-      .from('user_subscriptions') // <-- תוקן
+      .from('user_credits') // <-- תוקן
       .update({ credits_remaining: newCredits }) // <-- תוקן
       .eq('user_id', user_id)
       .select();
       
     if (updateError) {
-      console.error('Error updating user_subscriptions:', updateError.message);
+      console.error('Error updating user_credits:', updateError.message);
       throw new Error(`Failed to update credits: ${updateError.message}`);
     }
     
