@@ -1,4 +1,4 @@
-// netlify/functions/deduct-credit.js (תיקון - עובד עם user_subscriptions)
+// netlify/functions/deduct-credit.js (תיקון - עובד עם user_credits)
 const { createClient } = require('@supabase/supabase-js');
 
 exports.handler = async (event, context) => {
@@ -24,7 +24,7 @@ exports.handler = async (event, context) => {
     };
   }
   
-  console.log('--- deduct-credit function started (using user_subscriptions) ---');
+  console.log('--- deduct-credit function started (using user_credits) ---');
 
   const supabaseUrl = process.env.SUPABASE_URL;
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -78,7 +78,7 @@ exports.handler = async (event, context) => {
     // 1. === התיקון === קריאה מהטבלה הנכונה
     const { data: currentData, error: fetchError } = await supabase
       .from('user_credits') // <-- תוקן
-      .select('credits_remaining') // <-- תוקן
+      .select('remaining_credits') // <-- תוקן
       .eq('user_id', user_id)
       .single();
     
@@ -92,7 +92,7 @@ exports.handler = async (event, context) => {
       throw new Error(`No subscription record found for user: ${user_id}`);
     }
     
-    const currentCredits = currentData.credits_remaining || 0; // <-- תוקן
+    const currentCredits = currentData.remaining_credits || 0; // <-- תוקן
     console.log(`User has ${currentCredits} credits`);
     
     if (currentCredits <= 0) {
@@ -118,7 +118,7 @@ exports.handler = async (event, context) => {
     // 2. === התיקון === עדכון בטבלה הנכונה
     const { data: updateData, error: updateError } = await supabase
       .from('user_credits') // <-- תוקן
-      .update({ credits_remaining: newCredits }) // <-- תוקן
+      .update({ remaining_credits: newCredits }) // <-- תוקן
       .eq('user_id', user_id)
       .select();
       
