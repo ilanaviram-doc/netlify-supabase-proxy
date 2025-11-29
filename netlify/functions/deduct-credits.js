@@ -1,28 +1,27 @@
-import { createClient } from '@supabase/supabase-js';
+const { createClient } = require('@supabase/supabase-js');
 
-// משתני סביבה - ודא שהם מוגדרים ב-Netlify
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+// הגדרת משתני סביבה - וודא שהם מוגדרים ב-Netlify Dashboard
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY; // חשוב: חייב להיות Service Role Key ולא Anon Key!
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-
-export const handler = async (event, context) => {
+exports.handler = async (event, context) => {
+  // 1. הגדרת כותרות CORS (כדי לאפשר גישה מהאתר שלך)
   const headers = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type',
-    'Content-Type': 'application/json'
+    'Access-Control-Allow-Methods': 'POST, OPTIONS'
   };
 
-  // Handle preflight OPTIONS request
+  // 2. טיפול בבקשת "בדיקה מקדימה" (Preflight/OPTIONS)
   if (event.httpMethod === 'OPTIONS') {
     return {
       statusCode: 200,
       headers,
-      body: JSON.stringify({ message: 'OPTIONS request handled' })
+      body: ''
     };
   }
 
-  // Handle POST request
+  // 3. בדיקה שזו בקשת POST
   if (event.httpMethod !== 'POST') {
     return {
       statusCode: 405,
@@ -31,88 +30,71 @@ export const handler = async (event, context) => {
     };
   }
 
-  let data;
   try {
-    data = JSON.parse(event.body);
-  } catch (error) {
-    return {
-      statusCode: 400,
-      headers,
-      body: JSON.stringify({ error: 'Bad request: Invalid JSON body' })
-    };
-  }
-  
-  const { user_id, cost = 1 } = data; // Default cost to 1 if not provided
+    // אתחול הקליינט
+    const supabase = createClient(supabaseUrl, supabaseKey);
+    
+    // קריאת הנתונים שנשלחו מהדפדפן
+    const { user_id, cost } = JSON.parse(event.body);
 
-  if (!user_id) {
-    return {
-      statusCode: 400,
-      headers,
-      body: JSON.stringify({ error: 'Bad request: "user_id" is required' })
-    };
-  }
+    if (!user_id) {
+      throw new Error("Missing user_id");
+    }
 
-  try {
-    // 1. Fetch current credits
-    const { data: userData, error: fetchError } = await supabase
+    // עלות ברירת מחדל = 1, אלא אם נשלח משהו אחר
+    const deductionAmount = cost || 1;
+
+    // שלב א': שליפת המאזן הנוכחי
+    const { data: currentData, error: fetchError } = await supabase
       .from('user_credits')
       .select('remaining_credits')
       .eq('user_id', user_id)
       .single();
 
-    if (fetchError || !userData) {
-      console.error('Failed to fetch user:', fetchError?.message);
-      return {
-        statusCode: 404,
-        headers,
-        body: JSON.stringify({ error: 'User not found or fetch error' })
-      };
+    if (fetchError || !currentData) {
+      console.error('Error fetching credits:', fetchError);
+      throw new Error("User credits not found");
     }
 
-    const currentCredits = userData.remaining_credits;
-    if (currentCredits <= 0) {
-      return {
-        statusCode: 402, // Payment Required
-        headers,
-        body: JSON.stringify({ error: 'No remaining credits', new_balance: 0 })
-      };
-    }
+    const currentBalance = currentData.remaining_credits;
+    
+    // (אופציונלי: בדיקה אם נשאר קרדיט)
+    // if (currentBalance < deductionAmount) { ... }
 
-    // 2. Calculate new balance
-    const newBalance = Math.max(0, currentCredits - cost); // Ensure it doesn't go below 0
+    // שלב ב': חישוב המאזן החדש
+    const newBalance = currentBalance - deductionAmount;
 
-    // 3. Update credits in database
-    const { error: updateError } = await supabase
+    // שלב ג': עדכון בסיס הנתונים
+    const { data: updatedData, error: updateError } = await supabase
       .from('user_credits')
       .update({ remaining_credits: newBalance })
-      .eq('user_id', user_id);
+      .eq('user_id', user_id)
+      .select()
+      .single();
 
     if (updateError) {
-      console.error('Failed to update credits:', updateError.message);
-      return {
-        statusCode: 500,
-        headers,
-        body: JSON.stringify({ error: 'Failed to update credits' })
-      };
+      console.error('Error updating credits:', updateError);
+      throw new Error("Failed to update credits");
     }
 
-    // 4. CRITICAL STEP: Return the new balance
+    // 4. החזרת תשובה מוצלחת לדפדפן
     return {
       statusCode: 200,
       headers,
-      body: JSON.stringify({ 
-        success: true, 
-        new_balance: newBalance, // This is the field Voiceflow is capturing
-        deducted: cost 
+      body: JSON.stringify({
+        success: true,
+        new_balance: newBalance,
+        previous_balance: currentBalance,
+        deducted: deductionAmount
       })
     };
 
   } catch (error) {
-    console.error('Internal server error:', error.message);
+    console.error("Function error:", error.message);
     return {
       statusCode: 500,
       headers,
-      body: JSON.stringify({ error: `Internal server error: ${error.message}` })
+      body: JSON.stringify({ error: error.message })
     };
   }
 };
