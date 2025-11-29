@@ -1,15 +1,14 @@
 import { createClient } from '@supabase/supabase-js';
 
-// משתני סביבה - ודא שהם מוגדרים ב-Netlify
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 export const handler = async (event, context) => {
   const headers = {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type, X-User-ID, X-Voiceflow-User-ID',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
     'Content-Type': 'application/json'
   };
 
@@ -31,88 +30,157 @@ export const handler = async (event, context) => {
     };
   }
 
-  let data;
   try {
-    data = JSON.parse(event.body);
-  } catch (error) {
-    return {
-      statusCode: 400,
-      headers,
-      body: JSON.stringify({ error: 'Bad request: Invalid JSON body' })
-    };
-  }
-  
-  const { user_id, cost = 1 } = data; // Default cost to 1 if not provided
+    console.log('🔍 Incoming request headers:', JSON.stringify(event.headers, null, 2));
+    console.log('🔍 Incoming request body:', event.body);
 
-  if (!user_id) {
-    return {
-      statusCode: 400,
-      headers,
-      body: JSON.stringify({ error: 'Bad request: "user_id" is required' })
-    };
-  }
+    // ✅ קבלת user_id מ-3 מקורות אפשריים
+    let user_id = null;
+    
+    // אופציה 1: מ-Voiceflow headers (אוטומטי!)
+    if (event.headers['x-voiceflow-user-id']) {
+      user_id = event.headers['x-voiceflow-user-id'];
+      console.log('✅ Got userID from x-voiceflow-user-id header:', user_id);
+    }
+    
+    // אופציה 2: מ-custom header
+    if (!user_id && event.headers['x-user-id']) {
+      user_id = event.headers['x-user-id'];
+      console.log('✅ Got userID from x-user-id header:', user_id);
+    }
+    
+    // אופציה 3: מה-body (fallback)
+    if (!user_id && event.body) {
+      try {
+        const body = JSON.parse(event.body);
+        user_id = body.user_id;
+        console.log('✅ Got userID from body:', user_id);
+      } catch (e) {
+        console.error('❌ Failed to parse body:', e);
+      }
+    }
 
-  try {
-    // 1. Fetch current credits
-    const { data: userData, error: fetchError } = await supabase
+    // קבלת cost מה-body
+    let cost = 1; // default
+    if (event.body) {
+      try {
+        const body = JSON.parse(event.body);
+        cost = body.cost || 1;
+      } catch (e) {
+        console.error('❌ Failed to parse cost from body:', e);
+      }
+    }
+
+    console.log('📊 Final userID:', user_id);
+    console.log('📊 Cost:', cost);
+
+    // בדיקה שיש user_id
+    if (!user_id) {
+      console.error('❌ No user_id found!');
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({ 
+          error: 'user_id is required',
+          debug: {
+            headers: event.headers,
+            body: event.body
+          }
+        })
+      };
+    }
+
+    // Validation של UUID format
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(user_id)) {
+      console.error('❌ Invalid UUID format:', user_id);
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({ 
+          error: 'Invalid user_id format. Expected UUID.',
+          received: user_id
+        })
+      };
+    }
+
+    // שליפת הקרדיטים הנוכחיים
+    console.log('🔍 Fetching current credits for user:', user_id);
+    const { data: currentData, error: fetchError } = await supabase
       .from('user_credits')
       .select('remaining_credits')
       .eq('user_id', user_id)
       .single();
 
-    if (fetchError || !userData) {
-      console.error('Failed to fetch user:', fetchError?.message);
+    if (fetchError) {
+      console.error('❌ Fetch error:', fetchError);
       return {
         statusCode: 404,
         headers,
-        body: JSON.stringify({ error: 'User not found or fetch error' })
+        body: JSON.stringify({ 
+          error: 'User not found or fetch error',
+          details: fetchError.message 
+        })
       };
     }
 
-    const currentCredits = userData.remaining_credits;
-    if (currentCredits <= 0) {
+    if (!currentData) {
+      console.error('❌ No data found for user:', user_id);
       return {
-        statusCode: 402, // Payment Required
+        statusCode: 404,
         headers,
-        body: JSON.stringify({ error: 'No remaining credits', new_balance: 0 })
+        body: JSON.stringify({ 
+          error: 'User not found in user_credits table'
+        })
       };
     }
 
-    // 2. Calculate new balance
-    const newBalance = Math.max(0, currentCredits - cost); // Ensure it doesn't go below 0
+    const previousBalance = currentData.remaining_credits;
+    const newBalance = Math.max(0, previousBalance - cost);
 
-    // 3. Update credits in database
+    console.log(`💳 Deducting ${cost} credits: ${previousBalance} → ${newBalance}`);
+
+    // עדכון הקרדיטים
     const { error: updateError } = await supabase
       .from('user_credits')
       .update({ remaining_credits: newBalance })
       .eq('user_id', user_id);
 
     if (updateError) {
-      console.error('Failed to update credits:', updateError.message);
+      console.error('❌ Update error:', updateError);
       return {
         statusCode: 500,
         headers,
-        body: JSON.stringify({ error: 'Failed to update credits' })
+        body: JSON.stringify({ 
+          error: 'Failed to update credits',
+          details: updateError.message 
+        })
       };
     }
 
-    // 4. CRITICAL STEP: Return the new balance
+    console.log('✅ Credits deducted successfully!');
+
     return {
       statusCode: 200,
       headers,
-      body: JSON.stringify({ 
-        success: true, 
-        new_balance: newBalance, // This is the field Voiceflow is capturing
-        deducted: cost 
+      body: JSON.stringify({
+        success: true,
+        previous_balance: previousBalance,
+        deducted: cost,
+        new_balance: newBalance
       })
     };
 
-  } catch (error) {
-    console.error('Internal server error:', error.message);
+  } catch (err) {
+    console.error('❌ Unexpected error:', err);
     return {
       statusCode: 500,
       headers,
-      body: JSON.stringify({ error: `Internal server error: ${error.message}` })
+      body: JSON.stringify({ 
+        error: 'Internal server error',
+        message: err.message,
+        stack: err.stack
+      })
     };
   }
 };
