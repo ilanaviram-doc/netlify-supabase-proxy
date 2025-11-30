@@ -1,96 +1,95 @@
-const { createClient } = require('@supabase/supabase-js');
+import { createClient } from '@supabase/supabase-js';
 
-// הגדרת משתני סביבה - וודא שהם מוגדרים ב-Netlify Dashboard
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY; // חשוב: חייב להיות Service Role Key ולא Anon Key!
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabase = createClient(supabaseUrl, supabaseKey);
 
-exports.handler = async (event, context) => {
-  // 1. הגדרת כותרות CORS (כדי לאפשר גישה מהאתר שלך)
+export const handler = async (event) => {
+  // כותרות CORS (חשוב לתקשורת עם Voiceflow)
   const headers = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type',
     'Access-Control-Allow-Methods': 'POST, OPTIONS'
   };
 
-  // 2. טיפול בבקשת "בדיקה מקדימה" (Preflight/OPTIONS)
   if (event.httpMethod === 'OPTIONS') {
-    return {
-      statusCode: 200,
-      headers,
-      body: ''
-    };
-  }
-
-  // 3. בדיקה שזו בקשת POST
-  if (event.httpMethod !== 'POST') {
-    return {
-      statusCode: 405,
-      headers,
-      body: JSON.stringify({ error: 'Method Not Allowed' })
-    };
+    return { statusCode: 200, headers, body: '' };
   }
 
   try {
-    // אתחול הקליינט
-    const supabase = createClient(supabaseUrl, supabaseKey);
-    
-    // קריאת הנתונים שנשלחו מהדפדפן
-    const { user_id, cost } = JSON.parse(event.body);
+    const body = JSON.parse(event.body);
+    // לוג לבדיקה: מה בדיוק הגיע מ-Voiceflow?
+    console.log("🔍 Incoming Request Body:", body);
+
+    const { user_id, cost } = body;
+    const deduction = cost || 1;
 
     if (!user_id) {
-      throw new Error("Missing user_id");
+      console.error("❌ Error: user_id is missing");
+      return { statusCode: 400, headers, body: JSON.stringify({ error: "Missing user_id" }) };
     }
 
-    // עלות ברירת מחדל = 1, אלא אם נשלח משהו אחר
-    const deductionAmount = cost || 1;
-
-    // שלב א': שליפת המאזן הנוכחי
-    const { data: currentData, error: fetchError } = await supabase
+    // 1. נסיון לשלוף את המשתמש לפי הטבלה שבתמונה שלך
+    let { data: userRecord, error: fetchError } = await supabase
       .from('user_credits')
-      .select('remaining_credits')
-      .eq('user_id', user_id)
+      .select('*')
+      .eq('user_id', user_id) // תואם לעמודה בתמונה
       .single();
 
-    if (fetchError || !currentData) {
-      console.error('Error fetching credits:', fetchError);
-      throw new Error("User credits not found");
+    // 2. אם המשתמש לא קיים בטבלה - ניצור אותו (Upsert)
+    if (fetchError || !userRecord) {
+      console.log(`⚠️ User ${user_id} not found in credits table. Creating new record...`);
+      
+      const { data: newRecord, error: insertError } = await supabase
+        .from('user_credits')
+        .insert([
+          { user_id: user_id, remaining_credits: 50 } // נותן 50 מתנה למשתמש חדש
+        ])
+        .select()
+        .single();
+
+      if (insertError) {
+        console.error("❌ Failed to create user:", insertError);
+        return { statusCode: 500, headers, body: JSON.stringify({ error: "Failed to create user record", details: insertError }) };
+      }
+      userRecord = newRecord;
     }
 
-    const currentBalance = currentData.remaining_credits;
+    // 3. בדיקה אם נשארו קרדיטים
+    if (userRecord.remaining_credits < deduction) {
+      return {
+        statusCode: 403,
+        headers,
+        body: JSON.stringify({ success: false, message: "Not enough credits", new_balance: userRecord.remaining_credits })
+      };
+    }
+
+    // 4. ביצוע ההפחתה (Update)
+    const newBalance = userRecord.remaining_credits - deduction;
     
-    // (אופציונלי: בדיקה אם נשאר קרדיט)
-    // if (currentBalance < deductionAmount) { ... }
-
-    // שלב ב': חישוב המאזן החדש
-    const newBalance = currentBalance - deductionAmount;
-
-    // שלב ג': עדכון בסיס הנתונים
-    const { data: updatedData, error: updateError } = await supabase
+    const { data: updateData, error: updateError } = await supabase
       .from('user_credits')
-      .update({ remaining_credits: newBalance })
+      .update({ remaining_credits: newBalance }) // תואם לעמודה בתמונה
       .eq('user_id', user_id)
       .select()
       .single();
 
-    if (updateError) {
-      console.error('Error updating credits:', updateError);
-      throw new Error("Failed to update credits");
-    }
+    if (updateError) throw updateError;
 
-    // 4. החזרת תשובה מוצלחת לדפדפן
+    console.log(`✅ Success! New balance for ${user_id}: ${newBalance}`);
+
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
         success: true,
         new_balance: newBalance,
-        previous_balance: currentBalance,
-        deducted: deductionAmount
+        deducted: deduction
       })
     };
 
   } catch (error) {
-    console.error("Function error:", error.message);
+    console.error("🔥 System Error:", error);
     return {
       statusCode: 500,
       headers,
