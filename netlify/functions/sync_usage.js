@@ -2,9 +2,9 @@ const { createClient } = require('@supabase/supabase-js');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 const VF_API_KEY = process.env.VOICEFLOW_API_KEY;
+const VF_PROJECT_ID = '68d9462f0d7ce042ebb9af90'; // ה-ID של הפרויקט שלך
 
 exports.handler = async (event) => {
-  // הגדרות CORS (כדי שהדפדפן יסכים לדבר עם השרת)
   const headers = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type',
@@ -14,46 +14,54 @@ exports.handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers, body: '' };
 
   try {
-    const { session_id, user_id } = JSON.parse(event.body);
+    const { session_id, user_id } = JSON.parse(event.body); // session_id כאן הוא בעצם ה-UserID של Voiceflow
 
     if (!session_id || !user_id) {
         return { statusCode: 400, headers, body: JSON.stringify({ error: "Missing parameters" }) };
     }
 
-    // 1. קריאה ל-Voiceflow API
-    console.log(`🔍 Fetching transcript for Session ID: ${session_id}`);
+    console.log(`🔍 Looking for latest transcript for VF User: ${session_id}`);
+
+    // שדרוג: שלב 1 - חיפוש התמליל האחרון של המשתמש הזה
+    const listResponse = await fetch(
+        `https://analytics-api.voiceflow.com/v1/transcripts?projectID=${VF_PROJECT_ID}&userID=${session_id}&sort=createdAt&limit=1`, 
+        { headers: { 'Authorization': VF_API_KEY } }
+    );
+
+    if (!listResponse.ok) {
+        console.log(`❌ Failed to list transcripts: ${listResponse.status}`);
+        return { statusCode: 200, headers, body: JSON.stringify({ success: true, cost: 0, note: "User check failed" }) };
+    }
+
+    const listData = await listResponse.json();
     
-    const vfResponse = await fetch(`https://analytics-api.voiceflow.com/v1/transcript/${session_id}`, {
-        headers: { 
-            'Authorization': VF_API_KEY,
-            'Content-Type': 'application/json'
-        }
+    // אם אין שיחות בכלל למשתמש הזה
+    if (!listData || listData.length === 0) {
+        console.log("⚠️ No transcripts found for this user yet.");
+        return { statusCode: 200, headers, body: JSON.stringify({ success: true, cost: 0, note: "New conversation" }) };
+    }
+
+    // מצאנו! לוקחים את ה-ID האמיתי של התמליל
+    const transcriptID = listData[0]._id;
+    console.log(`✅ Found Transcript ID: ${transcriptID}`);
+
+    // שדרוג: שלב 2 - משיכת התמליל המלא לפי ה-ID שמצאנו
+    const vfResponse = await fetch(`https://analytics-api.voiceflow.com/v1/transcript/${transcriptID}`, {
+        headers: { 'Authorization': VF_API_KEY }
     });
 
-    // === דיבוג קריטי: למה Voiceflow נכשל? ===
     if (!vfResponse.ok) {
-        const status = vfResponse.status;
-        const errText = await vfResponse.text();
-        
-        console.log(`❌ Voiceflow Error: [${status}]`);
-        console.log(`❌ Details: ${errText}`);
-
-        // לא נחזיר שגיאה לדפדפן כדי לא לשבור את האתר, רק נדווח שהעלות 0 כרגע
-        return { statusCode: 200, headers, body: JSON.stringify({ success: true, cost: 0, note: "Transcript fetch failed" }) };
+        return { statusCode: 200, headers, body: JSON.stringify({ success: true, cost: 0 }) };
     }
 
     const data = await vfResponse.json();
     const turns = data.transcript?.turns || [];
 
-    // 2. חישוב עלויות חכם (מילים + הנחה)
+    // --- מכאן הלוגיקה של החיוב נשארת אותו דבר ---
     let totalScore = 0;
-    let turnCount = 0;
-
+    
     turns.forEach(turn => {
-        // בודקים רק הודעות טקסט/דיבור
         if (turn.type === 'text' || turn.type === 'speak') {
-            
-            // חילוץ תוכן בצורה בטוחה (עמיד לשינויים ב-API)
             let content = "";
             if (typeof turn.payload === 'string') content = turn.payload;
             else if (turn.payload?.text) content = turn.payload.text;
@@ -61,29 +69,23 @@ exports.handler = async (event) => {
             else if (turn.payload?.payload?.text) content = turn.payload.payload.text;
 
             if (content) {
-                turnCount++;
                 const wordCount = content.trim().split(/\s+/).length;
-                
-                // הנוסחה: 1 נקודה בסיס + 1 על כל 50 מילים
                 const baseCost = 1 + (wordCount / 50); 
                 
-                if (turn.source === 'system') {
-                    totalScore += baseCost; // מחיר מלא לבוט
-                } else if (turn.source === 'user') {
-                    totalScore += (baseCost * 0.5); // 50% הנחה למשתמש
-                }
+                if (turn.source === 'system') totalScore += baseCost;
+                else if (turn.source === 'user') totalScore += (baseCost * 0.5);
             }
         }
     });
 
     const finalCalculatedCost = Math.ceil(totalScore);
-    console.log(`📊 Transcript Analysis: ${turnCount} turns found. Calculated Value: ${finalCalculatedCost}`);
+    console.log(`📊 Session Value: ${finalCalculatedCost} credits`);
 
-    // 3. בדיקת דלתא (האם יש חיוב חדש?)
+    // בדיקת דלתא וחיוב ב-Supabase
     const { data: sessionRecord } = await supabase
         .from('processed_sessions')
         .select('charged_amount')
-        .eq('session_id', session_id)
+        .eq('session_id', transcriptID) // משתמשים ב-ID האמיתי של התמליל כמפתח
         .single();
 
     const alreadyPaid = sessionRecord ? sessionRecord.charged_amount : 0;
@@ -93,9 +95,8 @@ exports.handler = async (event) => {
         return { statusCode: 200, headers, body: JSON.stringify({ success: true, message: "No new charges" }) };
     }
 
-    console.log(`💳 Processing Charge: ${amountToChargeNow} credits (User: ${user_id})`);
+    console.log(`💳 CHARGING: ${amountToChargeNow} credits`);
 
-    // 4. ביצוע החיוב ב-Supabase
     const { data: userCredits } = await supabase
         .from('user_credits')
         .select('remaining_credits')
@@ -105,33 +106,22 @@ exports.handler = async (event) => {
     if (userCredits) {
         const newBalance = userCredits.remaining_credits - amountToChargeNow;
         
-        // עדכון יתרה
-        await supabase
-            .from('user_credits')
-            .update({ remaining_credits: newBalance })
-            .eq('user_id', user_id);
-            
-        // תיעוד התשלום
-        await supabase
-            .from('processed_sessions')
-            .upsert({ 
-                session_id: session_id, 
-                user_id: user_id, 
-                charged_amount: finalCalculatedCost,
-                last_sync: new Date().toISOString()
-            }, { onConflict: 'session_id' });
+        await supabase.from('user_credits').update({ remaining_credits: newBalance }).eq('user_id', user_id);
+        
+        await supabase.from('processed_sessions').upsert({ 
+            session_id: transcriptID, // שומרים לפי ה-ID של התמליל
+            user_id: user_id, 
+            charged_amount: finalCalculatedCost,
+            last_sync: new Date().toISOString()
+        }, { onConflict: 'session_id' });
 
-        return { 
-            statusCode: 200, 
-            headers, 
-            body: JSON.stringify({ success: true, charged: amountToChargeNow, new_balance: newBalance }) 
-        };
-    } else {
-        return { statusCode: 404, headers, body: JSON.stringify({ error: "User not found" }) };
-    }
+        return { statusCode: 200, headers, body: JSON.stringify({ success: true, charged: amountToChargeNow }) };
+    } 
+    
+    return { statusCode: 404, headers, body: JSON.stringify({ error: "User credits not found" }) };
 
   } catch (err) {
-    console.error("🔥 System Error:", err);
+    console.error("🔥 Error:", err);
     return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
   }
 };
