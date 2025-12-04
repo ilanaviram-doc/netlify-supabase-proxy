@@ -2,23 +2,23 @@ const { createClient } = require('@supabase/supabase-js');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 const VF_API_KEY = process.env.VOICEFLOW_API_KEY;
-// ה-ID של הפרויקט שלך (מהצילומים ששלחת)
+// ה-ID של הפרויקט שלך
 const VF_PROJECT_ID = '68d9462f0d7ce042ebb9af90';
 
-// פונקציית חילוץ טקסט שרתית
+// מנוע חילוץ טקסט (מותאם לפורמט שמצאנו ב-JSON של VF)
 function extractTextFromTurn(payload) {
     if (!payload) return "";
 
-    // 1. הזהב: בדיקה ישירה של השדה message (כפי שראית בטרנסקריפט)
+    // 1. הנתיב הישיר והנקי ביותר
     if (payload.message && typeof payload.message === 'string') {
         return payload.message;
     }
 
-    // 2. בדיקות גיבוי סטנדרטיות
+    // 2. נתיבים סטנדרטיים
     if (typeof payload === 'string') return payload;
     if (payload.text) return payload.text;
 
-    // 3. חילוץ מתוך Slate (למקרה שהפורמט משתנה בעתיד)
+    // 3. חילוץ מתוך Slate (גיבוי)
     if (payload.slate) {
         try { return JSON.stringify(payload.slate); } catch(e) { return ""; }
     }
@@ -40,37 +40,36 @@ exports.handler = async (event) => {
 
     if (!session_id || !user_id) return { statusCode: 400, headers, body: JSON.stringify({ error: "Missing params" }) };
 
-    console.log(`🔍 [SERVER] Checking Voiceflow for Session: ${session_id}`);
+    console.log(`🔍 [SERVER] Syncing Session: ${session_id}`);
 
-    // 1. חיפוש השיחה (Transcript) ב-Voiceflow לפי SessionID
+    // 1. פנייה ל-Voiceflow לקבלת התמליל
     const listUrl = `https://analytics-api.voiceflow.com/v1/transcripts?projectID=${VF_PROJECT_ID}&sessionID=${session_id}&sort=createdAt&limit=1`;
     
     const listResponse = await fetch(listUrl, { headers: { 'Authorization': VF_API_KEY } });
 
-    // === טיפול בעיכוב של Voiceflow (החלק הסבלני) ===
+    // === טיפול בעיכוב (Delay Handling) ===
     if (listResponse.status === 404) {
-        console.log("⏳ VF Status: Transcript not indexed yet (Delay is normal). Will check again in 60s.");
-        // מחזירים 'הצלחה' כדי שהדפדפן ימשיך לשלוח דופק
-        return { statusCode: 200, headers, body: JSON.stringify({ success: true, status: "pending_transcript" }) };
+        console.log("⏳ Status: Transcript pending (VF Delay). Retrying next cycle.");
+        // מחזירים הצלחה טכנית כדי שהדפדפן ימשיך לשדר דופק
+        return { statusCode: 200, headers, body: JSON.stringify({ success: true, status: "pending" }) };
     }
 
     if (!listResponse.ok) {
-        console.log(`❌ VF API Error: ${listResponse.status}`);
+        console.log(`❌ VF Error: ${listResponse.status}`);
         return { statusCode: 200, headers, body: JSON.stringify({ success: true, cost: 0 }) };
     }
 
     const listData = await listResponse.json();
     
-    // אם הרשימה עדיין ריקה
     if (!listData || listData.length === 0) {
-        console.log("⏳ VF Status: Empty list returned. Waiting...");
-        return { statusCode: 200, headers, body: JSON.stringify({ success: true, status: "pending_transcript" }) };
+        console.log("⏳ Status: Empty transcript list.");
+        return { statusCode: 200, headers, body: JSON.stringify({ success: true, status: "pending" }) };
     }
 
     const transcriptID = listData[0]._id;
-    // console.log(`✅ Found Transcript ID: ${transcriptID}`); // אפשר להחזיר אם רוצים לוג עמוס יותר
+    console.log(`✅ Found Transcript ID: ${transcriptID}`);
 
-    // 2. משיכת התוכן המלא (כאן נמצא הטקסט!)
+    // 2. משיכת התוכן המלא
     const vfResponse = await fetch(`https://analytics-api.voiceflow.com/v1/transcript/${transcriptID}`, {
         headers: { 'Authorization': VF_API_KEY }
     });
@@ -80,7 +79,7 @@ exports.handler = async (event) => {
     const data = await vfResponse.json();
     const turns = data.transcript?.turns || [];
 
-    // 3. חישוב עלויות (ספירת מילים בשרת)
+    // 3. חישוב עלויות בשרת
     let totalScore = 0;
     let turnCount = 0;
 
@@ -90,7 +89,8 @@ exports.handler = async (event) => {
             
             const content = extractTextFromTurn(turn.payload);
 
-            if (content && content.length > 1) { // מוודאים שזה לא סתם רווח
+            // סופרים רק אם יש תוכן אמיתי
+            if (content && content.length > 1) { 
                 turnCount++;
                 const wordCount = content.trim().split(/\s+/).length;
                 
@@ -107,23 +107,23 @@ exports.handler = async (event) => {
     });
 
     const finalCalculatedCost = Math.ceil(totalScore);
+    console.log(`📊 Stats: ${turnCount} turns found. Total Value: ${finalCalculatedCost}`);
 
-    // 4. חיוב (דלתא) - רק אם יש שינוי
+    // 4. חיוב (דלתא)
     const { data: sessionRecord } = await supabase
         .from('processed_sessions')
         .select('charged_amount')
-        .eq('session_id', transcriptID) // המפתח הוא ה-TranscriptID הייחודי
+        .eq('session_id', transcriptID) // שימוש ב-TranscriptID כמפתח ייחודי
         .single();
 
     const alreadyPaid = sessionRecord ? sessionRecord.charged_amount : 0;
     const amountToChargeNow = finalCalculatedCost - alreadyPaid;
 
     if (amountToChargeNow <= 0) {
-        // לא מדפיסים לוג אם אין שינוי, כדי לשמור על לוג נקי
         return { statusCode: 200, headers, body: JSON.stringify({ success: true, message: "Up to date" }) };
     }
 
-    console.log(`💳 CHARGING: ${amountToChargeNow} credits (Session Total: ${finalCalculatedCost})`);
+    console.log(`💳 CHARGING USER: ${amountToChargeNow} credits`);
 
     const { data: userCredits } = await supabase
         .from('user_credits')
