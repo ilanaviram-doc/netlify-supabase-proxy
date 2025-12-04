@@ -14,38 +14,53 @@ exports.handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers, body: '' };
 
   try {
-    const { session_id, user_id } = JSON.parse(event.body); // session_id כאן הוא בעצם ה-UserID של Voiceflow
+    // session_id שמגיע מהדפדפן הוא ה-ID של השיחה ב-Webchat
+    const { session_id, user_id } = JSON.parse(event.body); 
 
     if (!session_id || !user_id) {
         return { statusCode: 400, headers, body: JSON.stringify({ error: "Missing parameters" }) };
     }
 
-    console.log(`🔍 Looking for latest transcript for VF User: ${session_id}`);
+    console.log(`🔍 Searching transcript for SessionID: ${session_id}`);
 
-    // שדרוג: שלב 1 - חיפוש התמליל האחרון של המשתמש הזה
-    const listResponse = await fetch(
-        `https://analytics-api.voiceflow.com/v1/transcripts?projectID=${VF_PROJECT_ID}&userID=${session_id}&sort=createdAt&limit=1`, 
-        { headers: { 'Authorization': VF_API_KEY } }
-    );
+    // === התיקון הגדול: חיפוש לפי sessionID במקום userID ===
+    const listUrl = `https://analytics-api.voiceflow.com/v1/transcripts?projectID=${VF_PROJECT_ID}&sessionID=${session_id}&sort=createdAt&limit=1`;
+    
+    console.log(`📡 Calling URL: ${listUrl}`); // לוג דיבוג
+
+    const listResponse = await fetch(listUrl, { 
+        headers: { 'Authorization': VF_API_KEY } 
+    });
 
     if (!listResponse.ok) {
-        console.log(`❌ Failed to list transcripts: ${listResponse.status}`);
-        return { statusCode: 200, headers, body: JSON.stringify({ success: true, cost: 0, note: "User check failed" }) };
+        // אם עדיין 404 - ננסה טקטיקה אחרונה: חיפוש לפי userID (למקרה שזה משתנה)
+        console.log(`⚠️ Search by SessionID failed (${listResponse.status}). Retrying with UserID...`);
+        const retryUrl = `https://analytics-api.voiceflow.com/v1/transcripts?projectID=${VF_PROJECT_ID}&userID=${session_id}&sort=createdAt&limit=1`;
+        
+        const retryResponse = await fetch(retryUrl, { headers: { 'Authorization': VF_API_KEY } });
+        
+        if (!retryResponse.ok) {
+             console.log(`❌ Failed to find transcript. VF Status: ${retryResponse.status}`);
+             return { statusCode: 200, headers, body: JSON.stringify({ success: true, cost: 0, note: "Transcript not found" }) };
+        }
+        
+        // אם הצלחנו בניסיון השני - נשתמש בו
+        var listData = await retryResponse.json();
+    } else {
+        var listData = await listResponse.json();
     }
-
-    const listData = await listResponse.json();
     
-    // אם אין שיחות בכלל למשתמש הזה
+    // אם המערך ריק
     if (!listData || listData.length === 0) {
-        console.log("⚠️ No transcripts found for this user yet.");
-        return { statusCode: 200, headers, body: JSON.stringify({ success: true, cost: 0, note: "New conversation" }) };
+        console.log("⚠️ Empty list returned from Voiceflow.");
+        return { statusCode: 200, headers, body: JSON.stringify({ success: true, cost: 0 }) };
     }
 
-    // מצאנו! לוקחים את ה-ID האמיתי של התמליל
+    // מצאנו!
     const transcriptID = listData[0]._id;
     console.log(`✅ Found Transcript ID: ${transcriptID}`);
 
-    // שדרוג: שלב 2 - משיכת התמליל המלא לפי ה-ID שמצאנו
+    // שלב 2: משיכת התמליל המלא
     const vfResponse = await fetch(`https://analytics-api.voiceflow.com/v1/transcript/${transcriptID}`, {
         headers: { 'Authorization': VF_API_KEY }
     });
@@ -57,7 +72,7 @@ exports.handler = async (event) => {
     const data = await vfResponse.json();
     const turns = data.transcript?.turns || [];
 
-    // --- מכאן הלוגיקה של החיוב נשארת אותו דבר ---
+    // --- חישוב עלויות ---
     let totalScore = 0;
     
     turns.forEach(turn => {
@@ -79,13 +94,13 @@ exports.handler = async (event) => {
     });
 
     const finalCalculatedCost = Math.ceil(totalScore);
-    console.log(`📊 Session Value: ${finalCalculatedCost} credits`);
+    console.log(`📊 Session Cost: ${finalCalculatedCost}`);
 
-    // בדיקת דלתא וחיוב ב-Supabase
+    // עדכון Supabase
     const { data: sessionRecord } = await supabase
         .from('processed_sessions')
         .select('charged_amount')
-        .eq('session_id', transcriptID) // משתמשים ב-ID האמיתי של התמליל כמפתח
+        .eq('session_id', transcriptID)
         .single();
 
     const alreadyPaid = sessionRecord ? sessionRecord.charged_amount : 0;
@@ -105,11 +120,10 @@ exports.handler = async (event) => {
 
     if (userCredits) {
         const newBalance = userCredits.remaining_credits - amountToChargeNow;
-        
         await supabase.from('user_credits').update({ remaining_credits: newBalance }).eq('user_id', user_id);
         
         await supabase.from('processed_sessions').upsert({ 
-            session_id: transcriptID, // שומרים לפי ה-ID של התמליל
+            session_id: transcriptID,
             user_id: user_id, 
             charged_amount: finalCalculatedCost,
             last_sync: new Date().toISOString()
