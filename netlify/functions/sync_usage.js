@@ -2,14 +2,13 @@ const { createClient } = require('@supabase/supabase-js');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 const VF_API_KEY = process.env.VOICEFLOW_API_KEY;
+// ה-ID של הפרויקט
 const VF_PROJECT_ID = '68d9462f0d7ce042ebb9af90';
 
-// פונקציית חילוץ טקסט חכמה
+// פונקציית חילוץ טקסט
 function extractTextFromTurn(payload) {
     if (!payload) return "";
-    // 1. הזהב: הודעה נקייה
     if (payload.message && typeof payload.message === 'string') return payload.message;
-    // 2. גיבויים
     if (typeof payload === 'string') return payload;
     if (payload.text) return payload.text;
     if (payload.slate) { try { return JSON.stringify(payload.slate); } catch(e) { return ""; } }
@@ -26,61 +25,65 @@ exports.handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers, body: '' };
 
   try {
-    // אנחנו מקבלים את המזהה מהדפדפן (שהוא בעצם UserID ב-Webchat)
+    // session_id שמגיע מהדפדפן הוא ה-Identifier של המשתמש בצ'אט (zhcz...)
     const { session_id, user_id } = JSON.parse(event.body);
 
     if (!session_id || !user_id) return { statusCode: 400, headers, body: JSON.stringify({ error: "Missing params" }) };
 
-    console.log(`🔍 [SERVER] Searching transcripts for UserID: ${session_id}`);
+    console.log(`🔍 [SERVER] Syncing for VF ID: ${session_id}`);
 
-    // === תיקון 1: חיפוש לפי userID (ולא sessionID) ===
-    // === תיקון 2: מיון לפי תאריך יצירה יורד (הכי חדש) ===
-    const listUrl = `https://analytics-api.voiceflow.com/v1/transcripts?projectID=${VF_PROJECT_ID}&userID=${session_id}&sort=createdAt&limit=1`;
+    // ==================================================================
+    // שלב 1: חיפוש הטרנסקריפט (לפי ההנחיות החדשות של Voiceflow Support)
+    // ==================================================================
     
-    // === תיקון 3: Header באותיות קטנות (לפי המסמך ששלחת) ===
-    const listResponse = await fetch(listUrl, { 
+    // שימו לב: Endpoint שונה! לא transcripts אלא transcript/project
+    const searchUrl = `https://analytics-api.voiceflow.com/v1/transcript/project/${VF_PROJECT_ID}`;
+    
+    const searchResponse = await fetch(searchUrl, { 
+        method: 'POST', // חובה POST לפי ההנחיות
         headers: { 
             'authorization': VF_API_KEY,
-            'accept': 'application/json'
-        } 
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            sessionID: session_id // אנחנו מסננים לפי ה-ID של ה-Webchat
+        })
     });
 
-    if (!listResponse.ok) {
-        console.log(`❌ VF Error: ${listResponse.status} ${listResponse.statusText}`);
-        
-        // ניסיון גיבוי: אולי זה בכל זאת SessionID? (ליתר ביטחון)
-        const retryUrl = `https://analytics-api.voiceflow.com/v1/transcripts?projectID=${VF_PROJECT_ID}&sessionID=${session_id}&sort=createdAt&limit=1`;
-        const retryRes = await fetch(retryUrl, { headers: { 'authorization': VF_API_KEY } });
-        
-        if (retryRes.ok) {
-             var listData = await retryRes.json();
-             console.log("✅ Recovered! Found using SessionID fallback.");
-        } else {
-             // אם שניהם נכשלו - מחזירים 'המתנה'
-             return { statusCode: 200, headers, body: JSON.stringify({ success: true, status: "pending_transcript" }) };
-        }
-    } else {
-        var listData = await listResponse.json();
-    }
-    
-    if (!listData || listData.length === 0) {
-        console.log("⏳ No transcripts found for this user yet.");
-        return { statusCode: 200, headers, body: JSON.stringify({ success: true, status: "pending_transcript" }) };
+    if (!searchResponse.ok) {
+        console.log(`❌ VF Search Error: ${searchResponse.status}`);
+        return { statusCode: 200, headers, body: JSON.stringify({ success: true, status: "pending_search" }) };
     }
 
-    // מצאנו את השיחה!
-    const transcriptID = listData[0]._id;
+    const searchResult = await searchResponse.json();
+    const transcriptsList = searchResult.transcripts || [];
+
+    if (transcriptsList.length === 0) {
+        console.log("⏳ VF: No transcripts found yet (Indexing delay).");
+        return { statusCode: 200, headers, body: JSON.stringify({ success: true, status: "pending_index" }) };
+    }
+
+    // לוקחים את הראשון (הכי חדש, כי המערכת לרוב מחזירה ממוין, אבל אפשר להוסיף מיון אם צריך)
+    // לפי הדוקומנטציה זה מחזיר רשימה. ניקח את האחרון שנוצר.
+    transcriptsList.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    
+    const transcriptID = transcriptsList[0]._id || transcriptsList[0].id; // VF לפעמים משנים בין _id ל-id
     console.log(`✅ Found Transcript ID: ${transcriptID}`);
 
-    // 2. משיכת התוכן המלא
-    const vfResponse = await fetch(`https://analytics-api.voiceflow.com/v1/transcript/${transcriptID}`, {
-        headers: { 'authorization': VF_API_KEY } // גם כאן אותיות קטנות
+    // ==================================================================
+    // שלב 2: משיכת הפרטים המלאים (GET רגיל)
+    // ==================================================================
+    const detailUrl = `https://analytics-api.voiceflow.com/v1/transcript/${transcriptID}`;
+    const detailResponse = await fetch(detailUrl, { 
+        headers: { 'authorization': VF_API_KEY } 
     });
 
-    if (!vfResponse.ok) return { statusCode: 200, headers, body: JSON.stringify({ success: true }) };
+    if (!detailResponse.ok) {
+        return { statusCode: 200, headers, body: JSON.stringify({ success: true }) };
+    }
 
-    const data = await vfResponse.json();
-    const turns = data.transcript?.turns || [];
+    const data = await detailResponse.json();
+    const turns = data.transcript?.turns || data.turns || []; // גמישות במבנה
 
     // 3. חישוב עלויות
     let totalScore = 0;
@@ -94,16 +97,19 @@ exports.handler = async (event) => {
                 const wordCount = content.trim().split(/\s+/).length;
                 const baseCost = 1 + Math.floor(wordCount / 50); 
                 
-                if (turn.source === 'system') totalScore += baseCost;
-                else totalScore += (baseCost * 0.5); 
+                let itemCost = 0;
+                if (turn.source === 'system') itemCost = baseCost;
+                else itemCost = (baseCost * 0.5); 
+                
+                totalScore += itemCost;
             }
         }
     });
 
     const finalCalculatedCost = Math.ceil(totalScore);
-    console.log(`📊 Validated: ${turnCount} turns. Value: ${finalCalculatedCost}`);
+    console.log(`📊 Stats: ${turnCount} turns. Total Value: ${finalCalculatedCost}`);
 
-    // 4. חיוב ב-Supabase
+    // 4. חיוב ב-Supabase (דלתא)
     const { data: sessionRecord } = await supabase
         .from('processed_sessions')
         .select('charged_amount')
