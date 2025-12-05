@@ -4,12 +4,28 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 const VF_API_KEY = process.env.VOICEFLOW_API_KEY;
 const VF_PROJECT_ID = '68d9462f0d7ce042ebb9af90';
 
-function extractTextFromTurn(payload) {
-    if (!payload) return "";
-    if (payload.message && typeof payload.message === 'string') return payload.message;
-    if (typeof payload === 'string') return payload;
-    if (payload.text) return payload.text;
-    if (payload.slate) { try { return JSON.stringify(payload.slate); } catch(e) { return ""; } }
+// === NEW: Extraction Logic based on "Logs" structure ===
+function extractTextFromLog(log) {
+    try {
+        // 1. System/Bot Messages (Type: "trace")
+        if (log.type === 'trace' && log.data && log.data.payload) {
+            // Standard Text
+            if (log.data.payload.message) return log.data.payload.message;
+            // Slate (Rich Text)
+            if (log.data.payload.slate) return JSON.stringify(log.data.payload.slate);
+        }
+
+        // 2. User Messages (Type: "action")
+        if (log.type === 'action' && log.data && log.data.payload) {
+            // User text is often nested in payload.payload for requests
+            if (log.data.payload.payload && typeof log.data.payload.payload === 'string') {
+                return log.data.payload.payload;
+            }
+            // Fallback for simple payload
+            if (typeof log.data.payload === 'string') return log.data.payload;
+        }
+    } catch (e) { return ""; }
+    
     return "";
 }
 
@@ -27,60 +43,85 @@ exports.handler = async (event) => {
 
     if (!session_id || !user_id) return { statusCode: 400, headers, body: JSON.stringify({ error: "Missing params" }) };
 
-    console.log(`🔍 [SERVER] Syncing for VF ID: ${session_id}`);
+    console.log(`🔍 [SERVER] Syncing for UserID: ${session_id}`);
 
-    // 1. חיפוש (POST)
+    // 1. Search for Transcript (POST)
     const searchUrl = `https://analytics-api.voiceflow.com/v1/transcript/project/${VF_PROJECT_ID}`;
     const searchResponse = await fetch(searchUrl, { 
         method: 'POST', 
-        headers: { 'authorization': VF_API_KEY, 'Content-Type': 'application/json' },
+        headers: { 
+            'authorization': VF_API_KEY, 
+            'Content-Type': 'application/json' 
+        },
         body: JSON.stringify({ sessionID: session_id })
     });
 
-    if (!searchResponse.ok) return { statusCode: 200, headers, body: JSON.stringify({ success: true, status: "pending_search" }) };
+    if (!searchResponse.ok) {
+        console.log(`❌ Search Error: ${searchResponse.status}`);
+        return { statusCode: 200, headers, body: JSON.stringify({ success: true, status: "pending_search" }) };
+    }
 
     const searchResult = await searchResponse.json();
     const transcriptsList = searchResult.transcripts || [];
 
-    if (transcriptsList.length === 0) return { statusCode: 200, headers, body: JSON.stringify({ success: true, status: "pending_index" }) };
+    if (transcriptsList.length === 0) {
+        console.log("⏳ VF: No transcripts found yet.");
+        return { statusCode: 200, headers, body: JSON.stringify({ success: true, status: "pending_index" }) };
+    }
 
+    // Get the latest transcript
     transcriptsList.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     const transcriptID = transcriptsList[0]._id || transcriptsList[0].id;
     console.log(`✅ Found Transcript ID: ${transcriptID}`);
 
-    // 2. משיכת הפרטים (GET)
-    const detailUrl = `https://analytics-api.voiceflow.com/v1/transcript/${transcriptID}`;
-    const detailResponse = await fetch(detailUrl, { headers: { 'authorization': VF_API_KEY } });
+    // ==================================================================
+    // 2. Get Full Details (CRITICAL FIX: filterConversation=false)
+    // ==================================================================
+    // We add ?filterConversation=false to see the actual logs
+    const detailUrl = `https://analytics-api.voiceflow.com/v1/transcript/${transcriptID}?filterConversation=false`;
+    
+    const detailResponse = await fetch(detailUrl, { 
+        headers: { 'authorization': VF_API_KEY } 
+    });
 
     if (!detailResponse.ok) return { statusCode: 200, headers, body: JSON.stringify({ success: true }) };
 
     const data = await detailResponse.json();
 
-    // === ה-X-RAY: הדפסת המבנה האמיתי ללוג ===
-    console.log("🐛 DEBUG RAW DATA:", JSON.stringify(data).substring(0, 1000)); 
+    // === CRITICAL FIX: Look in 'logs' array, not turns ===
+    // Source says: "logs array ⭐ This is where your messages are!"
+    const logs = data.transcript?.logs || []; 
 
-    // ניסיון לנחש איפה המידע מסתתר
-    const turns = Array.isArray(data) ? data : (data.transcript || data.turns || []);
+    console.log(`🐛 Raw Logs Found: ${logs.length}`); // Debug
 
-    // 3. חישוב
+    // 3. Calculate Costs
     let totalScore = 0;
     let turnCount = 0;
 
-    turns.forEach(turn => {
-        // לוגיקה מקלה - סופרים הכל כדי לראות אם יש משהו
-        const content = extractTextFromTurn(turn.payload);
-        if (content) { 
+    logs.forEach(log => {
+        const content = extractTextFromLog(log);
+        
+        if (content && content.length > 1) { 
             turnCount++;
             const wordCount = content.trim().split(/\s+/).length;
             const baseCost = 1 + Math.floor(wordCount / 50); 
-            totalScore += (turn.source === 'system' ? baseCost : baseCost * 0.5); 
+            
+            // Determine source based on log type
+            let itemCost = 0;
+            if (log.type === 'trace') { // System/Bot
+                itemCost = baseCost;
+            } else if (log.type === 'action') { // User
+                itemCost = (baseCost * 0.5); 
+            }
+            
+            totalScore += itemCost;
         }
     });
 
     const finalCalculatedCost = Math.ceil(totalScore);
-    console.log(`📊 Stats: ${turnCount} turns. Total Value: ${finalCalculatedCost}`);
+    console.log(`📊 Analysis: ${turnCount} interactions. Value: ${finalCalculatedCost}`);
 
-    // 4. חיוב
+    // 4. Charge in Supabase
     const { data: sessionRecord } = await supabase
         .from('processed_sessions')
         .select('charged_amount')
@@ -90,7 +131,9 @@ exports.handler = async (event) => {
     const alreadyPaid = sessionRecord ? sessionRecord.charged_amount : 0;
     const amountToChargeNow = finalCalculatedCost - alreadyPaid;
 
-    if (amountToChargeNow <= 0) return { statusCode: 200, headers, body: JSON.stringify({ success: true, message: "Up to date" }) };
+    if (amountToChargeNow <= 0) {
+        return { statusCode: 200, headers, body: JSON.stringify({ success: true, message: "Up to date" }) };
+    }
 
     console.log(`💳 CHARGING: ${amountToChargeNow} credits`);
 
