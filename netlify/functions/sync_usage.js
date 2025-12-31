@@ -94,7 +94,9 @@ exports.handler = async (event) => {
 
     console.log(`🐛 Raw Logs Found: ${logs.length}`); // Debug
 
-    // 3. Calculate Costs
+    // ============================================================
+    // 3. Calculate Costs - 🆕 UPDATED WITH 20% REDUCTION
+    // ============================================================
     let totalScore = 0;
     let turnCount = 0;
 
@@ -104,7 +106,15 @@ exports.handler = async (event) => {
         if (content && content.length > 1) { 
             turnCount++;
             const wordCount = content.trim().split(/\s+/).length;
-            const baseCost = 1 + Math.floor(wordCount / 50); 
+            
+            // 🆕 נוסחה חדשה עם הפחתה של 20% (עודכן 31/12/2024)
+            const rawCost = 1 + Math.floor(wordCount / 50);
+            const baseCost = Math.ceil(rawCost * 0.8);  // הפחתה של 20%
+            
+            // Debug log לבדיקה (אופציונלי - אפשר להסיר אחרי שזה עובד)
+            if (wordCount > 50) {
+                console.log(`💰 Cost calc: ${wordCount} words = ${rawCost} → ${baseCost} credits (-20%)`);
+            }
             
             // Determine source based on log type
             let itemCost = 0;
