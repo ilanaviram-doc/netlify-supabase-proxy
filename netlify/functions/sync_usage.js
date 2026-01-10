@@ -4,7 +4,71 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 const VF_API_KEY = process.env.VOICEFLOW_API_KEY;
 const VF_PROJECT_ID = '68d9462f0d7ce042ebb9af90';
 
-// === NEW: Extraction Logic based on "Logs" structure ===
+// === 🛡️ NEW: System Message Patterns (לא לחייב!) ===
+const SYSTEM_MESSAGE_PATTERNS = [
+    // הודעות פתיחה וברכה
+    'שלום', 'ברוכים הבאים', 'ברוך הבא', 'ברוכה הבאה',
+    'היי', 'hello', 'welcome', 'hi there',
+    // הודעות חזרה אחרי אי פעילות
+    'חזרת', 'שמחים לראותך', 'ברוכים השבים', 'טוב שחזרת',
+    'לא היית פעיל', 'עבר זמן', 'הרבה זמן',
+    // הודעות מערכת כלליות
+    'איך אפשר לעזור', 'במה אוכל לעזור', 'מה תרצה',
+    'בחר אפשרות', 'בחרי אפשרות', 'לחץ על', 'לחצי על',
+    // הודעות סיום
+    'להתראות', 'ביי', 'תודה שפנית', 'נשמח לעזור שוב'
+];
+
+// === 🛡️ NEW: Button Response Patterns (לא לחייב!) ===
+const BUTTON_RESPONSE_PATTERNS = [
+    'כן', 'לא', 'אישור', 'ביטול', 'סגור', 'המשך',
+    'הבא', 'חזור', 'התחל', 'סיים', 'שלח', 'אשר',
+    'ok', 'yes', 'no', 'cancel', 'start', 'continue',
+    'back', 'next', 'done', 'submit'
+];
+
+// === 🛡️ NEW: Check if message should be free ===
+function isSystemMessage(content, logType) {
+    if (!content || content.length === 0) return true;
+    
+    const contentLower = content.toLowerCase().trim();
+    
+    // 1. הודעות בוט קצרות מאוד (< 50 תווים) = כנראה הודעת מערכת
+    if (logType === 'trace' && contentLower.length < 50) {
+        console.log(`🛡️ FREE: Short bot message (${contentLower.length} chars)`);
+        return true;
+    }
+    
+    // 2. הודעות משתמש קצרות מאוד (< 5 תווים) = כנראה כפתור
+    if (logType === 'action' && contentLower.length < 5) {
+        console.log(`🛡️ FREE: Short user message (${contentLower.length} chars)`);
+        return true;
+    }
+    
+    // 3. בדוק אם הודעת בוט מכילה מילות מערכת
+    if (logType === 'trace') {
+        for (const pattern of SYSTEM_MESSAGE_PATTERNS) {
+            if (contentLower.includes(pattern.toLowerCase())) {
+                console.log(`🛡️ FREE: System message (contains: "${pattern}")`);
+                return true;
+            }
+        }
+    }
+    
+    // 4. בדוק אם תשובת משתמש היא כפתור
+    if (logType === 'action' && contentLower.length <= 15) {
+        for (const pattern of BUTTON_RESPONSE_PATTERNS) {
+            if (contentLower === pattern.toLowerCase() || contentLower.includes(pattern.toLowerCase())) {
+                console.log(`🛡️ FREE: Button click ("${content}")`);
+                return true;
+            }
+        }
+    }
+    
+    return false;
+}
+
+// === Extraction Logic based on "Logs" structure ===
 function extractTextFromLog(log) {
     try {
         // 1. System/Bot Messages (Type: "trace")
@@ -77,7 +141,6 @@ exports.handler = async (event) => {
     // ==================================================================
     // 2. Get Full Details (CRITICAL FIX: filterConversation=false)
     // ==================================================================
-    // We add ?filterConversation=false to see the actual logs
     const detailUrl = `https://analytics-api.voiceflow.com/v1/transcript/${transcriptID}?filterConversation=false`;
     
     const detailResponse = await fetch(detailUrl, { 
@@ -88,37 +151,41 @@ exports.handler = async (event) => {
 
     const data = await detailResponse.json();
 
-    // === CRITICAL FIX: Look in 'logs' array, not turns ===
-    // Source says: "logs array ⭐ This is where your messages are!"
     const logs = data.transcript?.logs || []; 
 
-    console.log(`🐛 Raw Logs Found: ${logs.length}`); // Debug
+    console.log(`🐛 Raw Logs Found: ${logs.length}`);
 
     // ============================================================
-    // 3. Calculate Costs - 🆕 UPDATED WITH 20% REDUCTION
+    // 3. Calculate Costs - 🆕 WITH SYSTEM MESSAGE FILTERING
     // ============================================================
     let totalScore = 0;
     let turnCount = 0;
+    let freeCount = 0;  // 🆕 Track free messages
 
     logs.forEach(log => {
         const content = extractTextFromLog(log);
         
         if (content && content.length > 1) { 
+            
+            // 🛡️ NEW: Check if this is a free system message
+            if (isSystemMessage(content, log.type)) {
+                freeCount++;
+                return; // Skip - don't charge!
+            }
+            
             turnCount++;
             const wordCount = content.trim().split(/\s+/).length;
             
-            // 🆕 נוסחה חדשה עם הפחתה של 20% (עודכן 31/12/2024)
+            // נוסחה עם הפחתה של 20%
             const rawCost = 1 + Math.floor(wordCount / 50);
-            const baseCost = Math.ceil(rawCost * 0.8);  // הפחתה של 20%
+            const baseCost = Math.ceil(rawCost * 0.8);
             
-            // Debug log לבדיקה (אופציונלי - אפשר להסיר אחרי שזה עובד)
             if (wordCount > 50) {
                 console.log(`💰 Cost calc: ${wordCount} words = ${rawCost} → ${baseCost} credits (-20%)`);
             }
             
-            // Determine source based on log type
             let itemCost = 0;
-            if (log.type === 'trace') { // System/Bot
+            if (log.type === 'trace') { // Bot
                 itemCost = baseCost;
             } else if (log.type === 'action') { // User
                 itemCost = (baseCost * 0.5); 
@@ -129,7 +196,7 @@ exports.handler = async (event) => {
     });
 
     const finalCalculatedCost = Math.ceil(totalScore);
-    console.log(`📊 Analysis: ${turnCount} interactions. Value: ${finalCalculatedCost}`);
+    console.log(`📊 Analysis: ${turnCount} paid + ${freeCount} free interactions. Value: ${finalCalculatedCost}`);
 
     // 4. Charge in Supabase
     const { data: sessionRecord } = await supabase
