@@ -176,12 +176,14 @@ exports.handler = async (event) => {
             turnCount++;
             const wordCount = content.trim().split(/\s+/).length;
             
-            // נוסחה עם הפחתה של 20%
+            // 🆕 נוסחה מעודכנת - העלאה של 30% (עודכן 17/01/2025)
+            // לפני: rawCost * 0.8 (הפחתה של 20%)
+            // עכשיו: rawCost * 1.04 (0.8 * 1.3 = העלאה של 30% מהמצב הקודם)
             const rawCost = 1 + Math.floor(wordCount / 50);
-            const baseCost = Math.ceil(rawCost * 0.8);
+            const baseCost = Math.ceil(rawCost * 1.04);  // +30% מהמצב הקודם
             
             if (wordCount > 50) {
-                console.log(`💰 Cost calc: ${wordCount} words = ${rawCost} → ${baseCost} credits (-20%)`);
+                console.log(`💰 Cost calc: ${wordCount} words = ${rawCost} → ${baseCost} credits (+30%)`);
             }
             
             let itemCost = 0;
