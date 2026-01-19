@@ -27,45 +27,46 @@ const BUTTON_RESPONSE_PATTERNS = [
     'back', 'next', 'done', 'submit'
 ];
 
-// === 🛡️ NEW: Check if message should be free ===
+// === 🛡️ Check if message is a system message (charges 1 credit instead of full) ===
 function isSystemMessage(content, logType) {
-    if (!content || content.length === 0) return true;
+    if (!content || content.length === 0) return { skip: true, cost: 0 };
     
     const contentLower = content.toLowerCase().trim();
     
-    // 1. הודעות בוט קצרות מאוד (< 50 תווים) = כנראה הודעת מערכת
-    if (logType === 'trace' && contentLower.length < 50) {
-        console.log(`🛡️ FREE: Short bot message (${contentLower.length} chars)`);
-        return true;
-    }
-    
-    // 2. הודעות משתמש קצרות מאוד (< 5 תווים) = כנראה כפתור
+    // 1. הודעות משתמש קצרות מאוד (< 5 תווים) = כפתור = חינם!
     if (logType === 'action' && contentLower.length < 5) {
-        console.log(`🛡️ FREE: Short user message (${contentLower.length} chars)`);
-        return true;
+        console.log(`🆓 FREE: Very short user message (${contentLower.length} chars)`);
+        return { skip: true, cost: 0 };
     }
     
-    // 3. בדוק אם הודעת בוט מכילה מילות מערכת
-    if (logType === 'trace') {
-        for (const pattern of SYSTEM_MESSAGE_PATTERNS) {
-            if (contentLower.includes(pattern.toLowerCase())) {
-                console.log(`🛡️ FREE: System message (contains: "${pattern}")`);
-                return true;
-            }
-        }
-    }
-    
-    // 4. בדוק אם תשובת משתמש היא כפתור
+    // 2. לחיצות על כפתורים = חינם!
     if (logType === 'action' && contentLower.length <= 15) {
         for (const pattern of BUTTON_RESPONSE_PATTERNS) {
             if (contentLower === pattern.toLowerCase() || contentLower.includes(pattern.toLowerCase())) {
-                console.log(`🛡️ FREE: Button click ("${content}")`);
-                return true;
+                console.log(`🆓 FREE: Button click ("${content}")`);
+                return { skip: true, cost: 0 };
             }
         }
     }
     
-    return false;
+    // 3. הודעות בוט קצרות (< 50 תווים) = 1 קרדיט
+    if (logType === 'trace' && contentLower.length < 50) {
+        console.log(`💰 SYSTEM: Short bot message (${contentLower.length} chars) = 1 credit`);
+        return { skip: false, cost: 1 };
+    }
+    
+    // 4. הודעות מערכת (שלום, ברוכים הבאים) = 1 קרדיט
+    if (logType === 'trace') {
+        for (const pattern of SYSTEM_MESSAGE_PATTERNS) {
+            if (contentLower.includes(pattern.toLowerCase())) {
+                console.log(`💰 SYSTEM: "${pattern}" = 1 credit`);
+                return { skip: false, cost: 1 };
+            }
+        }
+    }
+    
+    // 5. הודעה רגילה = חישוב מלא
+    return { skip: false, cost: null };
 }
 
 // === Extraction Logic based on "Logs" structure ===
@@ -156,31 +157,43 @@ exports.handler = async (event) => {
     console.log(`🐛 Raw Logs Found: ${logs.length}`);
 
     // ============================================================
-    // 3. Calculate Costs - 🆕 WITH SYSTEM MESSAGE FILTERING
+    // 3. Calculate Costs - 🆕 15 words = 1 credit + system messages = 1 credit
     // ============================================================
     let totalScore = 0;
     let turnCount = 0;
-    let freeCount = 0;  // 🆕 Track free messages
+    let freeCount = 0;
+    let systemCount = 0;  // 🆕 Track system messages
 
     logs.forEach(log => {
         const content = extractTextFromLog(log);
         
         if (content && content.length > 1) { 
             
-            // 🛡️ NEW: Check if this is a free system message
-            if (isSystemMessage(content, log.type)) {
+            // 🛡️ Check message type
+            const messageCheck = isSystemMessage(content, log.type);
+            
+            // Skip completely free messages (buttons)
+            if (messageCheck.skip) {
                 freeCount++;
-                return; // Skip - don't charge!
+                return;
             }
             
+            // System message = fixed 1 credit
+            if (messageCheck.cost === 1) {
+                systemCount++;
+                totalScore += 1;
+                return;
+            }
+            
+            // Regular message = full calculation
             turnCount++;
             const wordCount = content.trim().split(/\s+/).length;
             
-            // 🆕 נוסחה חדשה - 25 מילים = 1 קרדיט (עודכן 18/01/2025)
-            // 150 מילים = 6 קרדיטים
-            // 100 מילים = 4 קרדיטים
-            // 50 מילים = 2 קרדיטים
-            const baseCost = Math.max(1, Math.ceil(wordCount / 25));
+            // 🆕 נוסחה חדשה - 15 מילים = 1 קרדיט (עודכן 19/01/2025)
+            // 150 מילים = 10 קרדיטים
+            // 100 מילים = 7 קרדיטים
+            // 50 מילים = 4 קרדיטים
+            const baseCost = Math.max(1, Math.ceil(wordCount / 15));
             
             console.log(`💰 Cost calc: ${wordCount} words = ${baseCost} credits`);
             
@@ -196,7 +209,7 @@ exports.handler = async (event) => {
     });
 
     const finalCalculatedCost = Math.ceil(totalScore);
-    console.log(`📊 Analysis: ${turnCount} paid + ${freeCount} free interactions. Value: ${finalCalculatedCost}`);
+    console.log(`📊 Analysis: ${turnCount} paid + ${systemCount} system (1 each) + ${freeCount} free. Total: ${finalCalculatedCost}`);
 
     // 4. Charge in Supabase
     const { data: sessionRecord } = await supabase
