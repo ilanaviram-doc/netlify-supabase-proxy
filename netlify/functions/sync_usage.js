@@ -157,7 +157,7 @@ exports.handler = async (event) => {
     console.log(`🐛 Raw Logs Found: ${logs.length}`);
 
     // ============================================================
-    // 3. Calculate Costs - 🆕 15 words = 1 credit + system messages = 1 credit
+    // 3. Calculate Costs - 🆕 20 words = 1 credit + system messages = 1 credit
     // ============================================================
     let totalScore = 0;
     let turnCount = 0;
@@ -189,11 +189,11 @@ exports.handler = async (event) => {
             turnCount++;
             const wordCount = content.trim().split(/\s+/).length;
             
-            // 🆕 נוסחה חדשה - 15 מילים = 1 קרדיט (עודכן 19/01/2025)
-            // 150 מילים = 10 קרדיטים
-            // 100 מילים = 7 קרדיטים
-            // 50 מילים = 4 קרדיטים
-            const baseCost = Math.max(1, Math.ceil(wordCount / 15));
+            // 🆕 נוסחה חדשה - 20 מילים = 1 קרדיט (עודכן 19/01/2025)
+            // 200 מילים = 10 קרדיטים
+            // 100 מילים = 5 קרדיטים
+            // 50 מילים = 2.5 קרדיטים
+            const baseCost = Math.max(1, Math.ceil(wordCount / 20));
             
             console.log(`💰 Cost calc: ${wordCount} words = ${baseCost} credits`);
             
