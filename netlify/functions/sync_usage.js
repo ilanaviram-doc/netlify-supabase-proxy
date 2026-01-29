@@ -4,7 +4,7 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 const VF_API_KEY = process.env.VOICEFLOW_API_KEY;
 const VF_PROJECT_ID = '68d9462f0d7ce042ebb9af90';
 
-// === 🛡️ NEW: System Message Patterns (לא לחייב!) ===
+// === 🛡️ System Message Patterns (לא לחייב!) ===
 const SYSTEM_MESSAGE_PATTERNS = [
     // הודעות פתיחה וברכה
     'שלום', 'ברוכים הבאים', 'ברוך הבא', 'ברוכה הבאה',
@@ -19,7 +19,7 @@ const SYSTEM_MESSAGE_PATTERNS = [
     'להתראות', 'ביי', 'תודה שפנית', 'נשמח לעזור שוב'
 ];
 
-// === 🛡️ NEW: Button Response Patterns (לא לחייב!) ===
+// === 🛡️ Button Response Patterns (לא לחייב!) ===
 const BUTTON_RESPONSE_PATTERNS = [
     'כן', 'לא', 'אישור', 'ביטול', 'סגור', 'המשך',
     'הבא', 'חזור', 'התחל', 'סיים', 'שלח', 'אשר',
@@ -27,7 +27,7 @@ const BUTTON_RESPONSE_PATTERNS = [
     'back', 'next', 'done', 'submit'
 ];
 
-// === 🛡️ Check if message is a system message (charges 1 credit instead of full) ===
+// === 🛡️ Check if message is a system message ===
 function isSystemMessage(content, logType) {
     if (!content || content.length === 0) return { skip: true, cost: 0 };
     
@@ -74,24 +74,61 @@ function extractTextFromLog(log) {
     try {
         // 1. System/Bot Messages (Type: "trace")
         if (log.type === 'trace' && log.data && log.data.payload) {
-            // Standard Text
             if (log.data.payload.message) return log.data.payload.message;
-            // Slate (Rich Text)
             if (log.data.payload.slate) return JSON.stringify(log.data.payload.slate);
         }
 
         // 2. User Messages (Type: "action")
         if (log.type === 'action' && log.data && log.data.payload) {
-            // User text is often nested in payload.payload for requests
             if (log.data.payload.payload && typeof log.data.payload.payload === 'string') {
                 return log.data.payload.payload;
             }
-            // Fallback for simple payload
             if (typeof log.data.payload === 'string') return log.data.payload;
         }
     } catch (e) { return ""; }
     
     return "";
+}
+
+// === 🆕 Log credit transaction to database ===
+async function logCreditTransaction(params) {
+    const {
+        user_id,
+        user_email,
+        amount,
+        balance_before,
+        balance_after,
+        session_id,
+        transaction_type = 'deduction',
+        source = 'voiceflow',
+        description = null,
+        metadata = null
+    } = params;
+
+    try {
+        const { error } = await supabase
+            .from('credit_logs')
+            .insert({
+                user_id,
+                user_email,
+                amount: -Math.abs(amount), // Always negative for deductions
+                transaction_type,
+                balance_before,
+                balance_after,
+                source,
+                voiceflow_session_id: session_id,
+                description,
+                metadata
+            });
+
+        if (error) {
+            console.error('❌ Failed to log credit transaction:', error.message);
+        } else {
+            console.log(`📝 Logged: ${amount} credits deducted from ${user_email}`);
+        }
+    } catch (err) {
+        console.error('❌ Error logging transaction:', err.message);
+    }
 }
 
 exports.handler = async (event) => {
@@ -157,50 +194,44 @@ exports.handler = async (event) => {
     console.log(`🐛 Raw Logs Found: ${logs.length}`);
 
     // ============================================================
-    // 3. Calculate Costs - 🆕 20 words = 1 credit + system messages = 1 credit
+    // 3. Calculate Costs - 20 words = 1 credit + system messages = 1 credit
     // ============================================================
     let totalScore = 0;
     let turnCount = 0;
     let freeCount = 0;
-    let systemCount = 0;  // 🆕 Track system messages
+    let systemCount = 0;
+    let totalWordCount = 0; // 🆕 Track total words
 
     logs.forEach(log => {
         const content = extractTextFromLog(log);
         
         if (content && content.length > 1) { 
             
-            // 🛡️ Check message type
             const messageCheck = isSystemMessage(content, log.type);
             
-            // Skip completely free messages (buttons)
             if (messageCheck.skip) {
                 freeCount++;
                 return;
             }
             
-            // System message = fixed 1 credit
             if (messageCheck.cost === 1) {
                 systemCount++;
                 totalScore += 1;
                 return;
             }
             
-            // Regular message = full calculation
             turnCount++;
             const wordCount = content.trim().split(/\s+/).length;
+            totalWordCount += wordCount; // 🆕 Accumulate
             
-            // 🆕 נוסחה חדשה - 20 מילים = 1 קרדיט (עודכן 19/01/2025)
-            // 200 מילים = 10 קרדיטים
-            // 100 מילים = 5 קרדיטים
-            // 50 מילים = 2.5 קרדיטים
             const baseCost = Math.max(1, Math.ceil(wordCount / 20));
             
             console.log(`💰 Cost calc: ${wordCount} words = ${baseCost} credits`);
             
             let itemCost = 0;
-            if (log.type === 'trace') { // Bot
+            if (log.type === 'trace') {
                 itemCost = baseCost;
-            } else if (log.type === 'action') { // User
+            } else if (log.type === 'action') {
                 itemCost = Math.ceil(baseCost * 0.5); 
             }
             
@@ -211,7 +242,7 @@ exports.handler = async (event) => {
     const finalCalculatedCost = Math.ceil(totalScore);
     console.log(`📊 Analysis: ${turnCount} paid + ${systemCount} system (1 each) + ${freeCount} free. Total: ${finalCalculatedCost}`);
 
-    // 4. Charge in Supabase
+    // 4. Check what's already been charged
     const { data: sessionRecord } = await supabase
         .from('processed_sessions')
         .select('charged_amount')
@@ -227,16 +258,31 @@ exports.handler = async (event) => {
 
     console.log(`💳 CHARGING: ${amountToChargeNow} credits`);
 
+    // 5. Get user info and current balance
     const { data: userCredits } = await supabase
         .from('user_credits')
         .select('remaining_credits')
         .eq('user_id', user_id)
         .single();
 
+    // 🆕 Get user email for logging
+    const { data: userProfile } = await supabase
+        .from('profiles')
+        .select('email')
+        .eq('id', user_id)
+        .single();
+
     if (userCredits) {
-        const newBalance = userCredits.remaining_credits - amountToChargeNow;
+        const balanceBefore = userCredits.remaining_credits;
+        const newBalance = balanceBefore - amountToChargeNow;
+        
+        // Update credits
         await supabase.from('user_credits').update({ remaining_credits: newBalance }).eq('user_id', user_id);
         
+        // 🆕 Sync to profiles table
+        await supabase.from('profiles').update({ credits: newBalance }).eq('id', user_id);
+        
+        // Update processed sessions
         await supabase.from('processed_sessions').upsert({ 
             session_id: transcriptID,
             user_id: user_id, 
@@ -244,7 +290,39 @@ exports.handler = async (event) => {
             last_sync: new Date().toISOString()
         }, { onConflict: 'session_id' });
 
-        return { statusCode: 200, headers, body: JSON.stringify({ success: true, charged: amountToChargeNow }) };
+        // 🆕 LOG THE TRANSACTION
+        await logCreditTransaction({
+            user_id,
+            user_email: userProfile?.email || null,
+            amount: amountToChargeNow,
+            balance_before: balanceBefore,
+            balance_after: newBalance,
+            session_id: transcriptID,
+            transaction_type: 'deduction',
+            source: 'voiceflow',
+            description: `שיחה: ${turnCount} הודעות, ${systemCount} מערכת, ${freeCount} חינם`,
+            metadata: {
+                transcript_id: transcriptID,
+                vf_session_id: session_id,
+                turn_count: turnCount,
+                system_count: systemCount,
+                free_count: freeCount,
+                total_word_count: totalWordCount,
+                already_paid: alreadyPaid,
+                total_calculated: finalCalculatedCost
+            }
+        });
+
+        return { 
+            statusCode: 200, 
+            headers, 
+            body: JSON.stringify({ 
+                success: true, 
+                charged: amountToChargeNow,
+                new_balance: newBalance,
+                logged: true
+            }) 
+        };
     } 
     
     return { statusCode: 404, headers, body: JSON.stringify({ error: "User not found" }) };
