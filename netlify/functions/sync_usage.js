@@ -200,7 +200,7 @@ exports.handler = async (event) => {
     let turnCount = 0;
     let freeCount = 0;
     let systemCount = 0;
-    let totalWordCount = 0; // 🆕 Track total words
+    let totalWordCount = 0;
 
     logs.forEach(log => {
         const content = extractTextFromLog(log);
@@ -222,7 +222,7 @@ exports.handler = async (event) => {
             
             turnCount++;
             const wordCount = content.trim().split(/\s+/).length;
-            totalWordCount += wordCount; // 🆕 Accumulate
+            totalWordCount += wordCount;
             
             const baseCost = Math.max(1, Math.ceil(wordCount / 20));
             
@@ -265,7 +265,7 @@ exports.handler = async (event) => {
         .eq('user_id', user_id)
         .single();
 
-    // 🆕 Get user email for logging
+    // Get user email for logging
     const { data: userProfile } = await supabase
         .from('profiles')
         .select('email')
@@ -276,21 +276,61 @@ exports.handler = async (event) => {
         const balanceBefore = userCredits.remaining_credits;
         const newBalance = balanceBefore - amountToChargeNow;
         
-        // Update credits
-        await supabase.from('user_credits').update({ remaining_credits: newBalance }).eq('user_id', user_id);
+        // ✅ FIX: Atomic-style operations with error checking
+        // Step 1: Deduct from user_credits (the critical operation)
+        const { error: creditError } = await supabase
+            .from('user_credits')
+            .update({ remaining_credits: newBalance })
+            .eq('user_id', user_id);
         
-        // 🆕 Sync to profiles table
-        await supabase.from('profiles').update({ credits: newBalance }).eq('id', user_id);
+        if (creditError) {
+            // ❌ CRITICAL: If credit deduction failed, DO NOT update processed_sessions!
+            // This prevents the bug where processed_sessions advances but credits aren't deducted
+            console.error('❌ CRITICAL: user_credits update FAILED:', creditError.message);
+            console.error('❌ NOT updating processed_sessions to prevent desync');
+            return { 
+                statusCode: 500, 
+                headers, 
+                body: JSON.stringify({ 
+                    error: "Credit deduction failed", 
+                    detail: creditError.message 
+                }) 
+            };
+        }
         
-        // Update processed sessions
-        await supabase.from('processed_sessions').upsert({ 
-            session_id: transcriptID,
-            user_id: user_id, 
-            charged_amount: finalCalculatedCost,
-            last_sync: new Date().toISOString()
-        }, { onConflict: 'session_id' });
+        console.log(`✅ user_credits updated: ${balanceBefore} → ${newBalance}`);
+        
+        // Step 2: Sync to profiles table (non-critical, log error but continue)
+        const { error: profileError } = await supabase
+            .from('profiles')
+            .update({ credits: newBalance })
+            .eq('id', user_id);
+        
+        if (profileError) {
+            console.warn('⚠️ profiles sync failed (non-critical):', profileError.message);
+        }
+        
+        // Step 3: Update processed_sessions (only after credits successfully deducted)
+        const { error: sessionError } = await supabase
+            .from('processed_sessions')
+            .upsert({ 
+                session_id: transcriptID,
+                user_id: user_id, 
+                charged_amount: finalCalculatedCost,
+                last_sync: new Date().toISOString()
+            }, { onConflict: 'session_id' });
+        
+        if (sessionError) {
+            // ⚠️ Credits were deducted but tracking failed
+            // This is less bad — user was charged correctly, just tracking is off
+            // Next sync will see old charged_amount and may double-charge
+            // Log prominently so we can investigate
+            console.error('⚠️ WARNING: processed_sessions update FAILED after credits deducted!');
+            console.error('⚠️ User:', user_id, 'Amount:', amountToChargeNow, 'Error:', sessionError.message);
+            console.error('⚠️ This may cause double-charging on next sync!');
+        }
 
-        // 🆕 LOG THE TRANSACTION
+        // Step 4: Log the transaction (non-critical, for audit trail)
         await logCreditTransaction({
             user_id,
             user_email: userProfile?.email || null,
@@ -325,6 +365,7 @@ exports.handler = async (event) => {
         };
     } 
     
+    console.error(`❌ User not found in user_credits: ${user_id}`);
     return { statusCode: 404, headers, body: JSON.stringify({ error: "User not found" }) };
 
   } catch (err) {
