@@ -195,17 +195,33 @@ exports.handler = async (event) => {
 
     // ============================================================
     // 3. Calculate Costs - 20 words = 1 credit + system messages = 1 credit
+    //    🆕 FIX: Greeting/intro bot messages before first user input = FREE
     // ============================================================
     let totalScore = 0;
     let turnCount = 0;
     let freeCount = 0;
     let systemCount = 0;
     let totalWordCount = 0;
+    let firstUserMessageSeen = false; // 🆕 Track greeting phase
 
     logs.forEach(log => {
         const content = extractTextFromLog(log);
         
         if (content && content.length > 1) { 
+            
+            // 🆓 FREE: All bot messages BEFORE the first real user message = greeting/intro = FREE
+            if (!firstUserMessageSeen) {
+                if (log.type === 'action') {
+                    // First user message found - greeting phase is over
+                    firstUserMessageSeen = true;
+                    // Continue to process this user message normally below
+                } else if (log.type === 'trace') {
+                    // Bot message before any user interaction = greeting = FREE!
+                    console.log(`🆓 FREE: Greeting/intro bot message (before first user input)`);
+                    freeCount++;
+                    return;
+                }
+            }
             
             const messageCheck = isSystemMessage(content, log.type);
             
