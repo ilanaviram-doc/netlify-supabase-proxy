@@ -1,8 +1,32 @@
 const { createClient } = require('@supabase/supabase-js');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
-const VF_API_KEY = process.env.VOICEFLOW_API_KEY;
-const VF_PROJECT_ID = '68d9462f0d7ce042ebb9af90';
+
+// ═══════════════════════════════════════════════════════════════
+// MULTI-PROJECT CONFIGURATION
+// Each agent has its own Voiceflow project ID and API key
+// ═══════════════════════════════════════════════════════════════
+const VF_PROJECTS = {
+    psychodynamic_adults: {
+        projectID: '69959a1f96fd12fff6692b6d',
+        apiKey: 'VF.DM.699600edf79fb10a552322f8.OyQC5L0acLwNHjfn'
+    },
+    psychodynamic_children: {
+        projectID: '69958e2496fd12fff66928c7',
+        apiKey: 'VF.DM.6996013bddce1f3281f671f5.fY8gv93hcf0wUSVv'
+    },
+    psychodynamic_parents: {
+        projectID: '68d9462f0d7ce042ebb9af90',
+        apiKey: 'VF.DM.68d9706c1305d072a1df8ce6.53ui9DPMyvkQ9QRO'
+    },
+    cbt: {
+        projectID: '69958a4396fd12fff66927ea',
+        apiKey: 'VF.DM.6996029741096f2458cc783f.i6JnW5cIt1FXEcpn'
+    }
+};
+
+// Fallback for old clients that don't send agent_type yet
+const DEFAULT_AGENT = 'psychodynamic_adults';
 
 // === 🛡️ System Message Patterns (לא לחייב!) ===
 const SYSTEM_MESSAGE_PATTERNS = [
@@ -99,6 +123,7 @@ async function logCreditTransaction(params) {
         balance_before,
         balance_after,
         session_id,
+        agent_type = null,
         transaction_type = 'deduction',
         source = 'voiceflow',
         description = null,
@@ -117,6 +142,7 @@ async function logCreditTransaction(params) {
                 balance_after,
                 source,
                 voiceflow_session_id: session_id,
+                agent_type,
                 description,
                 metadata
             });
@@ -124,7 +150,7 @@ async function logCreditTransaction(params) {
         if (error) {
             console.error('❌ Failed to log credit transaction:', error.message);
         } else {
-            console.log(`📝 Logged: ${amount} credits deducted from ${user_email}`);
+            console.log(`📝 Logged: ${amount} credits deducted from ${user_email} [${agent_type || 'unknown'}]`);
         }
     } catch (err) {
         console.error('❌ Error logging transaction:', err.message);
@@ -141,11 +167,18 @@ exports.handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers, body: '' };
 
   try {
-    const { session_id, user_id } = JSON.parse(event.body);
+    const { session_id, user_id, agent_type } = JSON.parse(event.body);
 
     if (!session_id || !user_id) return { statusCode: 400, headers, body: JSON.stringify({ error: "Missing params" }) };
 
-    console.log(`🔍 [SERVER] Syncing for UserID: ${session_id}`);
+    // ═══════════════════════════════════════════════════════════
+    // Resolve the correct Voiceflow project based on agent_type
+    // ═══════════════════════════════════════════════════════════
+    const resolvedAgent = agent_type && VF_PROJECTS[agent_type] ? agent_type : DEFAULT_AGENT;
+    const VF_PROJECT_ID = VF_PROJECTS[resolvedAgent].projectID;
+    const VF_API_KEY = VF_PROJECTS[resolvedAgent].apiKey;
+
+    console.log(`🔍 [SERVER] Syncing for UserID: ${session_id} | Agent: ${resolvedAgent} | Project: ${VF_PROJECT_ID}`);
 
     // 1. Search for Transcript (POST)
     const searchUrl = `https://analytics-api.voiceflow.com/v1/transcript/project/${VF_PROJECT_ID}`;
@@ -256,7 +289,7 @@ exports.handler = async (event) => {
     });
 
     const finalCalculatedCost = Math.ceil(totalScore);
-    console.log(`📊 Analysis: ${turnCount} paid + ${systemCount} system (1 each) + ${freeCount} free. Total: ${finalCalculatedCost}`);
+    console.log(`📊 Analysis: ${turnCount} paid + ${systemCount} system (1 each) + ${freeCount} free. Total: ${finalCalculatedCost} | Agent: ${resolvedAgent}`);
 
     // 4. Check what's already been charged
     const { data: sessionRecord } = await supabase
@@ -272,7 +305,7 @@ exports.handler = async (event) => {
         return { statusCode: 200, headers, body: JSON.stringify({ success: true, message: "Up to date" }) };
     }
 
-    console.log(`💳 CHARGING: ${amountToChargeNow} credits`);
+    console.log(`💳 CHARGING: ${amountToChargeNow} credits [${resolvedAgent}]`);
 
     // 5. Get user info and current balance
     const { data: userCredits } = await supabase
@@ -338,9 +371,6 @@ exports.handler = async (event) => {
         
         if (sessionError) {
             // ⚠️ Credits were deducted but tracking failed
-            // This is less bad — user was charged correctly, just tracking is off
-            // Next sync will see old charged_amount and may double-charge
-            // Log prominently so we can investigate
             console.error('⚠️ WARNING: processed_sessions update FAILED after credits deducted!');
             console.error('⚠️ User:', user_id, 'Amount:', amountToChargeNow, 'Error:', sessionError.message);
             console.error('⚠️ This may cause double-charging on next sync!');
@@ -354,12 +384,14 @@ exports.handler = async (event) => {
             balance_before: balanceBefore,
             balance_after: newBalance,
             session_id: transcriptID,
+            agent_type: resolvedAgent,
             transaction_type: 'deduction',
             source: 'voiceflow',
-            description: `שיחה: ${turnCount} הודעות, ${systemCount} מערכת, ${freeCount} חינם`,
+            description: `שיחה: ${turnCount} הודעות, ${systemCount} מערכת, ${freeCount} חינם [${resolvedAgent}]`,
             metadata: {
                 transcript_id: transcriptID,
                 vf_session_id: session_id,
+                agent_type: resolvedAgent,
                 turn_count: turnCount,
                 system_count: systemCount,
                 free_count: freeCount,
