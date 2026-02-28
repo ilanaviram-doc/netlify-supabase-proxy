@@ -27,13 +27,13 @@ exports.handler = async (event) => {
     const { action, userId, credential, deviceName } = JSON.parse(event.body);
 
     // Verify the user is an admin
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('role')
-      .eq('id', userId)
+    const { data: admin } = await supabase
+      .from('admins')
+      .select('user_id, role')
+      .eq('user_id', userId)
       .single();
 
-    if (!profile || profile.role !== 'admin') {
+    if (!admin) {
       return { statusCode: 403, headers: CORS_HEADERS, body: JSON.stringify({ error: 'Not authorized' }) };
     }
 
