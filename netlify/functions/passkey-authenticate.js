@@ -96,15 +96,25 @@ exports.handler = async (event) => {
         .delete()
         .eq('type', 'authenticate');
 
-      // Get user info
+      // Verify admin + get user info
+      const { data: admin } = await supabase
+        .from('admins')
+        .select('user_id, role')
+        .eq('user_id', passkey.user_id)
+        .single();
+
+      if (!admin) {
+        return { statusCode: 403, headers: CORS_HEADERS, body: JSON.stringify({ error: 'Not authorized' }) };
+      }
+
       const { data: profile } = await supabase
         .from('profiles')
-        .select('id, email, full_name, role')
+        .select('id, email, full_name')
         .eq('id', passkey.user_id)
         .single();
 
-      if (!profile || profile.role !== 'admin') {
-        return { statusCode: 403, headers: CORS_HEADERS, body: JSON.stringify({ error: 'Not an admin' }) };
+      if (!profile) {
+        return { statusCode: 403, headers: CORS_HEADERS, body: JSON.stringify({ error: 'Profile not found' }) };
       }
 
       // Generate a custom session token for this admin
