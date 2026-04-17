@@ -2,10 +2,6 @@ const { createClient } = require('@supabase/supabase-js');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-// ═══════════════════════════════════════════════════════════════
-// MULTI-PROJECT CONFIGURATION
-// Each agent has its own Voiceflow project ID and API key
-// ═══════════════════════════════════════════════════════════════
 const VF_PROJECTS = {
     psychodynamic_adults: {
         projectID: '69959a1f96fd12fff6692b6d',
@@ -25,25 +21,18 @@ const VF_PROJECTS = {
     }
 };
 
-// Fallback for old clients that don't send agent_type yet
 const DEFAULT_AGENT = 'psychodynamic_adults';
 
-// === 🛡️ System Message Patterns (לא לחייב!) ===
 const SYSTEM_MESSAGE_PATTERNS = [
-    // הודעות פתיחה וברכה
     'שלום', 'ברוכים הבאים', 'ברוך הבא', 'ברוכה הבאה',
     'היי', 'hello', 'welcome', 'hi there',
-    // הודעות חזרה אחרי אי פעילות
     'חזרת', 'שמחים לראותך', 'ברוכים השבים', 'טוב שחזרת',
     'לא היית פעיל', 'עבר זמן', 'הרבה זמן',
-    // הודעות מערכת כלליות
     'איך אפשר לעזור', 'במה אוכל לעזור', 'מה תרצה',
     'בחר אפשרות', 'בחרי אפשרות', 'לחץ על', 'לחצי על',
-    // הודעות סיום
     'להתראות', 'ביי', 'תודה שפנית', 'נשמח לעזור שוב'
 ];
 
-// === 🛡️ Button Response Patterns (לא לחייב!) ===
 const BUTTON_RESPONSE_PATTERNS = [
     'כן', 'לא', 'אישור', 'ביטול', 'סגור', 'המשך',
     'הבא', 'חזור', 'התחל', 'סיים', 'שלח', 'אשר',
@@ -51,19 +40,16 @@ const BUTTON_RESPONSE_PATTERNS = [
     'back', 'next', 'done', 'submit'
 ];
 
-// === 🛡️ Check if message is a system message ===
 function isSystemMessage(content, logType) {
     if (!content || content.length === 0) return { skip: true, cost: 0 };
     
     const contentLower = content.toLowerCase().trim();
     
-    // 1. הודעות משתמש קצרות מאוד (< 5 תווים) = כפתור = חינם!
     if (logType === 'action' && contentLower.length < 5) {
         console.log(`🆓 FREE: Very short user message (${contentLower.length} chars)`);
         return { skip: true, cost: 0 };
     }
     
-    // 2. לחיצות על כפתורים = חינם!
     if (logType === 'action' && contentLower.length <= 15) {
         for (const pattern of BUTTON_RESPONSE_PATTERNS) {
             if (contentLower === pattern.toLowerCase() || contentLower.includes(pattern.toLowerCase())) {
@@ -73,13 +59,11 @@ function isSystemMessage(content, logType) {
         }
     }
     
-    // 3. הודעות בוט קצרות (< 50 תווים) = 1 קרדיט
     if (logType === 'trace' && contentLower.length < 50) {
         console.log(`💰 SYSTEM: Short bot message (${contentLower.length} chars) = 1 credit`);
         return { skip: false, cost: 1 };
     }
     
-    // 4. הודעות מערכת (שלום, ברוכים הבאים) = 1 קרדיט
     if (logType === 'trace') {
         for (const pattern of SYSTEM_MESSAGE_PATTERNS) {
             if (contentLower.includes(pattern.toLowerCase())) {
@@ -89,20 +73,16 @@ function isSystemMessage(content, logType) {
         }
     }
     
-    // 5. הודעה רגילה = חישוב מלא
     return { skip: false, cost: null };
 }
 
-// === Extraction Logic based on "Logs" structure ===
 function extractTextFromLog(log) {
     try {
-        // 1. System/Bot Messages (Type: "trace")
         if (log.type === 'trace' && log.data && log.data.payload) {
             if (log.data.payload.message) return log.data.payload.message;
             if (log.data.payload.slate) return JSON.stringify(log.data.payload.slate);
         }
 
-        // 2. User Messages (Type: "action")
         if (log.type === 'action' && log.data && log.data.payload) {
             if (log.data.payload.payload && typeof log.data.payload.payload === 'string') {
                 return log.data.payload.payload;
@@ -114,37 +94,21 @@ function extractTextFromLog(log) {
     return "";
 }
 
-// === 🆕 Log credit transaction to database ===
 async function logCreditTransaction(params) {
     const {
-        user_id,
-        user_email,
-        amount,
-        balance_before,
-        balance_after,
-        session_id,
-        agent_type = null,
-        transaction_type = 'deduction',
-        source = 'voiceflow',
-        description = null,
-        metadata = null
+        user_id, user_email, amount, balance_before, balance_after,
+        session_id, agent_type = null, transaction_type = 'deduction',
+        source = 'voiceflow', description = null, metadata = null
     } = params;
 
     try {
         const { error } = await supabase
             .from('credit_logs')
             .insert({
-                user_id,
-                user_email,
-                amount: -Math.abs(amount), // Always negative for deductions
-                transaction_type,
-                balance_before,
-                balance_after,
-                source,
-                voiceflow_session_id: session_id,
-                agent_type,
-                description,
-                metadata
+                user_id, user_email,
+                amount: -Math.abs(amount),
+                transaction_type, balance_before, balance_after, source,
+                voiceflow_session_id: session_id, agent_type, description, metadata
             });
 
         if (error) {
@@ -168,26 +132,22 @@ exports.handler = async (event) => {
 
   try {
     const { session_id, user_id, agent_type } = JSON.parse(event.body);
+    
+    // 🔍 DEBUG
+    console.log(`📦 PARAMS: session_id=${session_id} | user_id=${user_id} | agent=${agent_type}`);
 
     if (!session_id || !user_id) return { statusCode: 400, headers, body: JSON.stringify({ error: "Missing params" }) };
 
-    // ═══════════════════════════════════════════════════════════
-    // Resolve the correct Voiceflow project based on agent_type
-    // ═══════════════════════════════════════════════════════════
     const resolvedAgent = agent_type && VF_PROJECTS[agent_type] ? agent_type : DEFAULT_AGENT;
     const VF_PROJECT_ID = VF_PROJECTS[resolvedAgent].projectID;
     const VF_API_KEY = VF_PROJECTS[resolvedAgent].apiKey;
 
     console.log(`🔍 [SERVER] Syncing for UserID: ${session_id} | Agent: ${resolvedAgent} | Project: ${VF_PROJECT_ID}`);
 
-    // 1. Search for Transcript (POST)
     const searchUrl = `https://analytics-api.voiceflow.com/v1/transcript/project/${VF_PROJECT_ID}`;
     const searchResponse = await fetch(searchUrl, { 
         method: 'POST', 
-        headers: { 
-            'authorization': VF_API_KEY, 
-            'Content-Type': 'application/json' 
-        },
+        headers: { 'authorization': VF_API_KEY, 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionID: session_id })
     });
 
@@ -204,16 +164,11 @@ exports.handler = async (event) => {
         return { statusCode: 200, headers, body: JSON.stringify({ success: true, status: "pending_index" }) };
     }
 
-    // Get the latest transcript
     transcriptsList.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     const transcriptID = transcriptsList[0]._id || transcriptsList[0].id;
     console.log(`✅ Found Transcript ID: ${transcriptID}`);
 
-    // ==================================================================
-    // 2. Get Full Details (CRITICAL FIX: filterConversation=false)
-    // ==================================================================
     const detailUrl = `https://analytics-api.voiceflow.com/v1/transcript/${transcriptID}?filterConversation=false`;
-    
     const detailResponse = await fetch(detailUrl, { 
         headers: { 'authorization': VF_API_KEY } 
     });
@@ -221,35 +176,33 @@ exports.handler = async (event) => {
     if (!detailResponse.ok) return { statusCode: 200, headers, body: JSON.stringify({ success: true }) };
 
     const data = await detailResponse.json();
-
     const logs = data.transcript?.logs || []; 
 
     console.log(`🐛 Raw Logs Found: ${logs.length}`);
 
     // ============================================================
-    // 3. Calculate Costs - 20 words = 1 credit + system messages = 1 credit
-    //    🆕 FIX: Greeting/intro bot messages before first user input = FREE
+    // 3. Calculate Costs
     // ============================================================
     let totalScore = 0;
     let turnCount = 0;
     let freeCount = 0;
     let systemCount = 0;
     let totalWordCount = 0;
-    let firstUserMessageSeen = false; // 🆕 Track greeting phase
+    let firstUserMessageSeen = false;
 
     logs.forEach(log => {
+        // 🔍 DEBUG - מבנה הלוגים
+        console.log(`🔍 LOG: type=${log.type} | data_keys=${Object.keys(log.data || {}).join(',')} | payload_keys=${Object.keys(log.data?.payload || {}).join(',')}`);
         const content = extractTextFromLog(log);
-        
+        console.log(`📝 CONTENT (${content.length} chars): "${content.substring(0, 80)}"`);
+        // 🔍 END DEBUG
+
         if (content && content.length > 1) { 
             
-            // 🆓 FREE: All bot messages BEFORE the first real user message = greeting/intro = FREE
             if (!firstUserMessageSeen) {
                 if (log.type === 'action') {
-                    // First user message found - greeting phase is over
                     firstUserMessageSeen = true;
-                    // Continue to process this user message normally below
                 } else if (log.type === 'trace') {
-                    // Bot message before any user interaction = greeting = FREE!
                     console.log(`🆓 FREE: Greeting/intro bot message (before first user input)`);
                     freeCount++;
                     return;
@@ -274,7 +227,6 @@ exports.handler = async (event) => {
             totalWordCount += wordCount;
             
             const baseCost = Math.max(1, Math.ceil(wordCount / 20));
-            
             console.log(`💰 Cost calc: ${wordCount} words = ${baseCost} credits`);
             
             let itemCost = 0;
@@ -314,7 +266,6 @@ exports.handler = async (event) => {
         .eq('user_id', user_id)
         .single();
 
-    // Get user email for logging
     const { data: userProfile } = await supabase
         .from('profiles')
         .select('email')
@@ -325,31 +276,21 @@ exports.handler = async (event) => {
         const balanceBefore = userCredits.remaining_credits;
         const newBalance = balanceBefore - amountToChargeNow;
         
-        // ✅ FIX: Atomic-style operations with error checking
-        // Step 1: Deduct from user_credits (the critical operation)
         const { error: creditError } = await supabase
             .from('user_credits')
             .update({ remaining_credits: newBalance })
             .eq('user_id', user_id);
         
         if (creditError) {
-            // ❌ CRITICAL: If credit deduction failed, DO NOT update processed_sessions!
-            // This prevents the bug where processed_sessions advances but credits aren't deducted
             console.error('❌ CRITICAL: user_credits update FAILED:', creditError.message);
-            console.error('❌ NOT updating processed_sessions to prevent desync');
             return { 
-                statusCode: 500, 
-                headers, 
-                body: JSON.stringify({ 
-                    error: "Credit deduction failed", 
-                    detail: creditError.message 
-                }) 
+                statusCode: 500, headers, 
+                body: JSON.stringify({ error: "Credit deduction failed", detail: creditError.message }) 
             };
         }
         
         console.log(`✅ user_credits updated: ${balanceBefore} → ${newBalance}`);
         
-        // Step 2: Sync to profiles table (non-critical, log error but continue)
         const { error: profileError } = await supabase
             .from('profiles')
             .update({ credits: newBalance })
@@ -359,7 +300,6 @@ exports.handler = async (event) => {
             console.warn('⚠️ profiles sync failed (non-critical):', profileError.message);
         }
         
-        // Step 3: Update processed_sessions (only after credits successfully deducted)
         const { error: sessionError } = await supabase
             .from('processed_sessions')
             .upsert({ 
@@ -370,13 +310,9 @@ exports.handler = async (event) => {
             }, { onConflict: 'session_id' });
         
         if (sessionError) {
-            // ⚠️ Credits were deducted but tracking failed
-            console.error('⚠️ WARNING: processed_sessions update FAILED after credits deducted!');
-            console.error('⚠️ User:', user_id, 'Amount:', amountToChargeNow, 'Error:', sessionError.message);
-            console.error('⚠️ This may cause double-charging on next sync!');
+            console.error('⚠️ WARNING: processed_sessions update FAILED:', sessionError.message);
         }
 
-        // Step 4: Log the transaction (non-critical, for audit trail)
         await logCreditTransaction({
             user_id,
             user_email: userProfile?.email || null,
@@ -402,13 +338,10 @@ exports.handler = async (event) => {
         });
 
         return { 
-            statusCode: 200, 
-            headers, 
+            statusCode: 200, headers, 
             body: JSON.stringify({ 
-                success: true, 
-                charged: amountToChargeNow,
-                new_balance: newBalance,
-                logged: true
+                success: true, charged: amountToChargeNow,
+                new_balance: newBalance, logged: true
             }) 
         };
     } 
