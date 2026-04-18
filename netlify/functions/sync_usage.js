@@ -63,7 +63,6 @@ function isSystemMessage(content, logType) {
         }
     }
 
-    // ✅ כל action = לחיצת כפתור = חינם
     if (logType === 'action') {
         console.log(`🆓 FREE: Button label click ("${content}")`);
         return { skip: true, cost: 0 };
@@ -94,7 +93,6 @@ function extractTextFromLog(log) {
         }
 
         if (log.type === 'action' && log.data && log.data.payload) {
-            // ✅ תיקון: תמיכה גם ב-payload.payload וגם ב-payload.label
             if (log.data.payload.payload && typeof log.data.payload.payload === 'string') {
                 return log.data.payload.payload;
             }
@@ -136,10 +134,16 @@ async function logCreditTransaction(params) {
 }
 
 exports.handler = async (event) => {
+  // ✅ תיקון CORS: דומיין ספציפי במקום wildcard
+  const origin = event.headers.origin || event.headers.Origin || '';
+  const allowedOrigins = ['https://clinikai.co', 'https://www.clinikai.co'];
+  const allowOrigin = allowedOrigins.includes(origin) ? origin : 'https://clinikai.co';
+
   const headers = {
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': allowOrigin,
     'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS'
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Credentials': 'true'
   };
 
   if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers, body: '' };
