@@ -18,6 +18,10 @@ const VF_PROJECTS = {
     cbt: {
         projectID: '69958a4396fd12fff66927ea',
         apiKey: 'VF.DM.6996029741096f2458cc783f.i6JnW5cIt1FXEcpn'
+    },
+    trauma: {
+        projectID: '69a3f7f5c0c1216a818db914',
+        apiKey: 'VF.DM.69ad21fb6ef184469efcd20a.Dws9LKtLUulD9OIS'
     }
 };
 
@@ -58,6 +62,12 @@ function isSystemMessage(content, logType) {
             }
         }
     }
+
+    // ✅ כל action = לחיצת כפתור = חינם
+    if (logType === 'action') {
+        console.log(`🆓 FREE: Button label click ("${content}")`);
+        return { skip: true, cost: 0 };
+    }
     
     if (logType === 'trace' && contentLower.length < 50) {
         console.log(`💰 SYSTEM: Short bot message (${contentLower.length} chars) = 1 credit`);
@@ -84,8 +94,12 @@ function extractTextFromLog(log) {
         }
 
         if (log.type === 'action' && log.data && log.data.payload) {
+            // ✅ תיקון: תמיכה גם ב-payload.payload וגם ב-payload.label
             if (log.data.payload.payload && typeof log.data.payload.payload === 'string') {
                 return log.data.payload.payload;
+            }
+            if (log.data.payload.label && typeof log.data.payload.label === 'string') {
+                return log.data.payload.label;
             }
             if (typeof log.data.payload === 'string') return log.data.payload;
         }
@@ -132,11 +146,11 @@ exports.handler = async (event) => {
 
   try {
     const { session_id, user_id, agent_type } = JSON.parse(event.body);
-    
-    // 🔍 DEBUG
-    console.log(`📦 PARAMS: session_id=${session_id} | user_id=${user_id} | agent=${agent_type}`);
 
-    if (!session_id || !user_id) return { statusCode: 400, headers, body: JSON.stringify({ error: "Missing params" }) };
+    if (!session_id || !user_id) return { 
+        statusCode: 400, headers, 
+        body: JSON.stringify({ error: "Missing params" }) 
+    };
 
     const resolvedAgent = agent_type && VF_PROJECTS[agent_type] ? agent_type : DEFAULT_AGENT;
     const VF_PROJECT_ID = VF_PROJECTS[resolvedAgent].projectID;
@@ -169,9 +183,7 @@ exports.handler = async (event) => {
     console.log(`✅ Found Transcript ID: ${transcriptID}`);
 
     const detailUrl = `https://analytics-api.voiceflow.com/v1/transcript/${transcriptID}?filterConversation=false`;
-    const detailResponse = await fetch(detailUrl, { 
-        headers: { 'authorization': VF_API_KEY } 
-    });
+    const detailResponse = await fetch(detailUrl, { headers: { 'authorization': VF_API_KEY } });
 
     if (!detailResponse.ok) return { statusCode: 200, headers, body: JSON.stringify({ success: true }) };
 
@@ -180,9 +192,6 @@ exports.handler = async (event) => {
 
     console.log(`🐛 Raw Logs Found: ${logs.length}`);
 
-    // ============================================================
-    // 3. Calculate Costs
-    // ============================================================
     let totalScore = 0;
     let turnCount = 0;
     let freeCount = 0;
@@ -191,12 +200,8 @@ exports.handler = async (event) => {
     let firstUserMessageSeen = false;
 
     logs.forEach(log => {
-        // 🔍 DEBUG - מבנה הלוגים
-        console.log(`🔍 LOG: type=${log.type} | data_keys=${Object.keys(log.data || {}).join(',')} | payload_keys=${Object.keys(log.data?.payload || {}).join(',')}`);
         const content = extractTextFromLog(log);
-        console.log(`📝 CONTENT (${content.length} chars): "${content.substring(0, 80)}"`);
-        // 🔍 END DEBUG
-
+        
         if (content && content.length > 1) { 
             
             if (!firstUserMessageSeen) {
@@ -243,6 +248,117 @@ exports.handler = async (event) => {
     const finalCalculatedCost = Math.ceil(totalScore);
     console.log(`📊 Analysis: ${turnCount} paid + ${systemCount} system (1 each) + ${freeCount} free. Total: ${finalCalculatedCost} | Agent: ${resolvedAgent}`);
 
+    const { data: sessionRecord } = await supabase
+        .from('processed_sessions')
+        .select('charged_amount')
+        .eq('session_id', transcriptID)
+        .single();
+
+    const alreadyPaid = sessionRecord ? sessionRecord.charged_amount : 0;
+    const amountToChargeNow = finalCalculatedCost - alreadyPaid;
+
+    if (amountToChargeNow <= 0) {
+        return { statusCode: 200, headers, body: JSON.stringify({ success: true, message: "Up to date" }) };
+    }
+
+    console.log(`💳 CHARGING: ${amountToChargeNow} credits [${resolvedAgent}]`);
+
+    const { data: userCredits } = await supabase
+        .from('user_credits')
+        .select('remaining_credits')
+        .eq('user_id', user_id)
+        .single();
+
+    const { data: userProfile } = await supabase
+        .from('profiles')
+        .select('email')
+        .eq('id', user_id)
+        .single();
+
+    if (userCredits) {
+        const balanceBefore = userCredits.remaining_credits;
+        const newBalance = balanceBefore - amountToChargeNow;
+        
+        const { error: creditError } = await supabase
+            .from('user_credits')
+            .update({ remaining_credits: newBalance })
+            .eq('user_id', user_id);
+        
+        if (creditError) {
+            console.error('❌ CRITICAL: user_credits update FAILED:', creditError.message);
+            return { 
+                statusCode: 500, headers, 
+                body: JSON.stringify({ error: "Credit deduction failed", detail: creditError.message }) 
+            };
+        }
+        
+        console.log(`✅ user_credits updated: ${balanceBefore} → ${newBalance}`);
+        
+        const { error: profileError } = await supabase
+            .from('profiles')
+            .update({ credits: newBalance })
+            .eq('id', user_id);
+        
+        if (profileError) {
+            console.warn('⚠️ profiles sync failed (non-critical):', profileError.message);
+        }
+        
+        const { error: sessionError } = await supabase
+            .from('processed_sessions')
+            .upsert({ 
+                session_id: transcriptID,
+                user_id: user_id, 
+                charged_amount: finalCalculatedCost,
+                last_sync: new Date().toISOString()
+            }, { onConflict: 'session_id' });
+        
+        if (sessionError) {
+            console.error('⚠️ WARNING: processed_sessions update FAILED:', sessionError.message);
+        }
+
+        await logCreditTransaction({
+            user_id,
+            user_email: userProfile?.email || null,
+            amount: amountToChargeNow,
+            balance_before: balanceBefore,
+            balance_after: newBalance,
+            session_id: transcriptID,
+            agent_type: resolvedAgent,
+            transaction_type: 'deduction',
+            source: 'voiceflow',
+            description: `שיחה: ${turnCount} הודעות, ${systemCount} מערכת, ${freeCount} חינם [${resolvedAgent}]`,
+            metadata: {
+                transcript_id: transcriptID,
+                vf_session_id: session_id,
+                agent_type: resolvedAgent,
+                turn_count: turnCount,
+                system_count: systemCount,
+                free_count: freeCount,
+                total_word_count: totalWordCount,
+                already_paid: alreadyPaid,
+                total_calculated: finalCalculatedCost
+            }
+        });
+
+        return { 
+            statusCode: 200, headers, 
+            body: JSON.stringify({ 
+                success: true, 
+                charged: amountToChargeNow,
+                new_balance: newBalance, 
+                logged: true
+            }) 
+        };
+    } 
+    
+    console.error(`❌ User not found in user_credits: ${user_id}`);
+    return { statusCode: 404, headers, body: JSON.stringify({ error: "User not found" }) };
+
+  } catch (err) {
+    console.error("🔥 Server Error:", err);
+    return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
+  }
+};
     // 4. Check what's already been charged
     const { data: sessionRecord } = await supabase
         .from('processed_sessions')
