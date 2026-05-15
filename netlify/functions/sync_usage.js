@@ -4,8 +4,8 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 
 const VF_PROJECTS = {
     psychodynamic_adults: {
-        projectID: '69959a1f96fd12fff6692b6d',
-        apiKey: 'VF.DM.699600edf79fb10a552322f8.OyQC5L0acLwNHjfn'
+        projectID: '69f9ef9b565755ff6b8deda6',
+        apiKey: 'VF.DM.69fe505e8e9fa3970cfc938a.ilBxGICI6rxlITZx'
     },
     psychodynamic_children: {
         projectID: '69958e2496fd12fff66928c7',
