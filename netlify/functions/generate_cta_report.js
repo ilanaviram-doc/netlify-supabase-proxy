@@ -1,17 +1,17 @@
 // netlify/functions/generate_cta_report.js
 // ============================================================
-// CTA General Report Generator
+// CTA General Report Generator — v2
 // ============================================================
-// Flow:
-//   1. Verify user JWT
-//   2. Pull aggregation data from Supabase (aggregate_cta_report_data RPC)
-//   3. Pull theme definitions (get_themes_for_report RPC)
-//   4. Build LLM prompt with both
-//   5. Call Claude Sonnet
-//   6. Parse + validate JSON response
-//   7. Return structured report to frontend
-//
-// Frontend renders the JSON into HTML — no HTML in this function.
+// Improvements over v1:
+//   - MAX_TOKENS = 3500 (enough for full report, fits in <30s)
+//   - System prompt enforces strict JSON output (no markdown)
+//   - Robust JSON parsing: strips markdown wrappers + handles
+//     trailing commas + extracts JSON from any noise
+//   - Truncated-JSON detection with clear error
+//   - temperature: 0.3 for consistent output
+//   - CORS headers on ALL response paths
+//   - Internal console.log for fast Netlify debugging
+//   - Uses Haiku 4.5 by default (fast + cheap)
 // ============================================================
 
 const { createClient } = require('@supabase/supabase-js');
@@ -22,7 +22,8 @@ const SUPABASE_ANON = process.env.SUPABASE_ANON_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
 const MODEL = 'claude-haiku-4-5-20251001';
-const MAX_TOKENS = 1500;
+const MAX_TOKENS = 3500;
+const TEMPERATURE = 0.3;
 
 const ALLOWED_ORIGIN = 'https://clinikai.co';
 
@@ -34,8 +35,15 @@ const corsHeaders = (origin) => ({
   'Content-Type': 'application/json'
 });
 
+// Helper to build error responses with CORS headers always present
+const errorResponse = (origin, statusCode, body) => ({
+  statusCode,
+  headers: corsHeaders(origin),
+  body: JSON.stringify(body)
+});
+
 // ────────────────────────────────────────────────────────────
-// SYSTEM PROMPT — see 05_prompt_cta_general.md for full doc
+// SYSTEM PROMPT — strict JSON output
 // ────────────────────────────────────────────────────────────
 const SYSTEM_PROMPT = `אתה מומחה לפסיכותרפיה פסיכודינמית ולסופרוויז'ן קליני.
 תפקידך לכתוב דוח התפתחות קליני אורכי על מטפל, מבוסס על שיחות הדרכה שהוא קיים בפלטפורמת ClinikAI.
@@ -59,7 +67,19 @@ const SYSTEM_PROMPT = `אתה מומחה לפסיכותרפיה פסיכודינ
 
 7. **שפה עברית מקצועית.** השתמש במונחים העבריים שמופיעים בגלוסר — לא "פיחות" אלא "דוולואציה". לא "כשירות" אלא "קומפיטנטיות".
 
-8. **פלט JSON תקני בלבד.** ללא markdown, ללא הקדמה, ללא סיכום. רק ה-JSON.`;
+==========================================
+פלט: JSON תקני בלבד
+==========================================
+
+קריטי: התשובה שלך חייבת להיות JSON תקני בלבד.
+- אל תעטוף את ה-JSON ב-\`\`\`json או \`\`\` או כל wrapper אחר.
+- אל תוסיף הקדמה, סיכום, או הסברים.
+- אל תכלול comments בתוך ה-JSON.
+- אל תשתמש ב-trailing commas.
+- כל מחרוזת חייבת להיות בתוך מירכאות כפולות.
+- התחל את התשובה עם { וסיים עם }.
+
+החזק את הניסוחים תמציתיים כדי לעמוד במגבלת ה-tokens. עדיף ממצא מובהק קצר על ממצא מפותל ארוך.`;
 
 // ────────────────────────────────────────────────────────────
 // Build the user prompt with injected data
@@ -80,21 +100,20 @@ ${JSON.stringify(themeDefs, null, 2)}
 ${JSON.stringify(aggregation, null, 2)}
 
 # המטלה:
-כתוב דוח התפתחות קליני אורכי על המטפל. הדוח חייב להיות JSON תקני במבנה הבא:
+כתוב דוח התפתחות קליני אורכי על המטפל במבנה JSON הבא.
 
+מבנה הדוח:
 {
   "overview": {
-    "intro_paragraph": "פסקת פתיחה של 3-4 משפטים שמתארת את הדוח. השתמש במספרי המקרים והשיחות. נסח באופן מזמין לא רשמי."
+    "intro_paragraph": "פסקה של 3-4 משפטים. כללי, מזמין, לא רשמי."
   },
-  "themes_in_report": [
-    "A1", "B1"
-  ],
+  "themes_in_report": ["A1", "B1"],
   "findings": [
     {
       "id": "f1",
-      "title": "כותרת קצרה (4-7 מילים)",
-      "narrative": "פסקה של 2-4 משפטים. תאר את הדפוס, רמוז על שאלת המקור, מבלי לשפוט.",
-      "insight_callout": "תובנה ספציפית של 1-2 משפטים (אופציונלי, יכול להיות null).",
+      "title": "כותרת קצרה",
+      "narrative": "2-4 משפטים. דפוס + רמז למקור.",
+      "insight_callout": "תובנה ספציפית או null",
       "supporting_session_ids": ["session_id1"],
       "primary_themes": ["B1"]
     }
@@ -102,8 +121,8 @@ ${JSON.stringify(aggregation, null, 2)}
   "clusters": [
     {
       "id": "c1",
-      "label": "תווית קצרה",
-      "description": "משפט אחד שמתאר את האשכול ושאלת ההדרכה האופיינית שלו",
+      "label": "תווית",
+      "description": "משפט אחד",
       "case_count": 2,
       "case_hashes": ["case_hash1"],
       "primary_themes": ["B1"]
@@ -121,22 +140,68 @@ ${JSON.stringify(aggregation, null, 2)}
     {
       "id": "g1",
       "tag": "צמיחה",
-      "text": "משפט קצר. אל תכתוב 'עליך לעשות X' אלא 'הצעד הבא עשוי להיות X'.",
+      "text": "הצעד הבא עשוי להיות X (לא 'עליך לעשות X')",
       "supporting_themes": ["B3b"]
     }
   ]
 }
 
-# הערות חשובות:
-- 3-4 findings סך הכל. בחר את הדפוסים החזקים ביותר.
-- 2-4 clusters. אל תאשכל אם אין באמת קבוצות מובחנות.
-- 2-3 strengths ו-2-3 growth_areas.
-- "supporting_session_ids" חייבים להיות מתוך הנתונים. אסור להמציא.
-- "primary_themes" ו-"supporting_themes" חייבים להיות קודי תמות מהטקסונומיה.
-- ב-clusters: אל תכלול את "general_reflective" או "unassigned".
-- אם אין מספיק נתונים לקטגוריה — תן כמה שיש, אל תמציא.
+הנחיות לכמויות:
+- findings: בדיוק 3 (לא יותר)
+- clusters: 2-3
+- strengths: 2-3
+- growth_areas: 2
 
-החזר רק את ה-JSON. ללא markdown.`;
+הנחיות חמורות:
+- supporting_session_ids ו-case_hashes חייבים להיות מתוך הנתונים. אסור להמציא.
+- primary_themes ו-supporting_themes חייבים להיות קודי תמות מהטקסונומיה.
+- ב-clusters: אל תכלול "general_reflective" או "unassigned".
+- אם אין מספיק נתונים לקטגוריה — תן פחות, אל תמציא.
+
+החזר רק את ה-JSON. שום דבר אחר.`;
+}
+
+// ────────────────────────────────────────────────────────────
+// Extract JSON from response — robust to wrappers + noise
+// ────────────────────────────────────────────────────────────
+function extractJSON(text) {
+  if (!text) return null;
+
+  // Strip markdown code fences (json/javascript/empty)
+  let cleaned = text
+    .replace(/^```(?:json|javascript|js)?\s*/i, '')
+    .replace(/\s*```\s*$/i, '')
+    .trim();
+
+  // Find first { and last } - extract just the JSON part
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+
+  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
+    return null;
+  }
+
+  cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+
+  // Remove trailing commas before } or ] (common LLM error)
+  cleaned = cleaned
+    .replace(/,(\s*})/g, '$1')
+    .replace(/,(\s*])/g, '$1');
+
+  return cleaned;
+}
+
+// ────────────────────────────────────────────────────────────
+// Detect if JSON looks truncated (Claude hit max_tokens mid-output)
+// ────────────────────────────────────────────────────────────
+function looksTruncated(text, stopReason) {
+  if (stopReason === 'max_tokens') return true;
+  if (!text) return false;
+
+  // Heuristic: if text ends mid-string or mid-array/object
+  const trimmed = text.trimEnd();
+  const lastChar = trimmed[trimmed.length - 1];
+  return lastChar !== '}' && lastChar !== ']';
 }
 
 // ────────────────────────────────────────────────────────────
@@ -176,28 +241,32 @@ function validateReport(report) {
 // ────────────────────────────────────────────────────────────
 exports.handler = async (event) => {
   const origin = event.headers.origin || event.headers.Origin || '';
-  const headers = corsHeaders(origin);
+  const startTime = Date.now();
 
   if (event.httpMethod === 'OPTIONS') {
-    return { statusCode: 204, headers, body: '' };
+    return { statusCode: 204, headers: corsHeaders(origin), body: '' };
   }
 
   if (event.httpMethod !== 'POST') {
-    return {
-      statusCode: 405,
-      headers,
-      body: JSON.stringify({ error: 'Method not allowed' })
-    };
+    return errorResponse(origin, 405, { error: 'Method not allowed' });
+  }
+
+  console.log('[CTA] Request received');
+
+  // Verify env vars
+  if (!SUPABASE_URL || !SUPABASE_ANON || !ANTHROPIC_API_KEY) {
+    console.error('[CTA] Missing env vars:', {
+      hasUrl: !!SUPABASE_URL,
+      hasAnon: !!SUPABASE_ANON,
+      hasAnthropic: !!ANTHROPIC_API_KEY
+    });
+    return errorResponse(origin, 500, { error: 'Server config missing env vars' });
   }
 
   // Auth: forward the user's JWT
   const authHeader = event.headers.authorization || event.headers.Authorization || '';
   if (!authHeader.startsWith('Bearer ')) {
-    return {
-      statusCode: 401,
-      headers,
-      body: JSON.stringify({ error: 'Missing auth' })
-    };
+    return errorResponse(origin, 401, { error: 'Missing auth' });
   }
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON, {
@@ -208,14 +277,11 @@ exports.handler = async (event) => {
   // Get authenticated user
   const { data: userData, error: userErr } = await supabase.auth.getUser();
   if (userErr || !userData?.user) {
-    return {
-      statusCode: 401,
-      headers,
-      body: JSON.stringify({ error: 'Invalid token' })
-    };
+    return errorResponse(origin, 401, { error: 'Invalid token', detail: userErr?.message });
   }
 
   const userId = userData.user.id;
+  console.log('[CTA] Authenticated user:', userId);
 
   // ──────────────────────────────────────────────
   // Step 1: Fetch aggregation data
@@ -224,25 +290,19 @@ exports.handler = async (event) => {
     .rpc('aggregate_cta_report_data', { p_user_id: userId });
 
   if (aggErr) {
-    return {
-      statusCode: 500,
-      headers,
-      body: JSON.stringify({ error: 'Aggregation failed', detail: aggErr.message })
-    };
+    console.error('[CTA] Aggregation failed:', aggErr.message);
+    return errorResponse(origin, 500, { error: 'Aggregation failed', detail: aggErr.message });
   }
 
-  // Minimum threshold check
   const totalSessions = aggregation?.counts?.total_sessions || 0;
+  console.log('[CTA] Sessions:', totalSessions);
+
   if (totalSessions < 5) {
-    return {
-      statusCode: 400,
-      headers,
-      body: JSON.stringify({
-        error: 'Insufficient data',
-        message: `נדרשות לפחות 5 שיחות לדוח. כרגע יש ${totalSessions}.`,
-        sessions_count: totalSessions
-      })
-    };
+    return errorResponse(origin, 400, {
+      error: 'Insufficient data',
+      message: `נדרשות לפחות 5 שיחות לדוח. כרגע יש ${totalSessions}.`,
+      sessions_count: totalSessions
+    });
   }
 
   // ──────────────────────────────────────────────
@@ -250,42 +310,45 @@ exports.handler = async (event) => {
   // ──────────────────────────────────────────────
   const themeFreq = aggregation.theme_frequency || [];
   const appearingCodes = themeFreq.map(t => t.theme);
+  console.log('[CTA] Appearing theme codes:', appearingCodes.length);
 
   const { data: themeDefs, error: defErr } = await supabase
     .rpc('get_themes_for_report', { p_codes: appearingCodes });
 
   if (defErr) {
-    return {
-      statusCode: 500,
-      headers,
-      body: JSON.stringify({ error: 'Theme definitions fetch failed', detail: defErr.message })
-    };
+    console.error('[CTA] Theme defs failed:', defErr.message);
+    return errorResponse(origin, 500, { error: 'Theme definitions fetch failed', detail: defErr.message });
   }
 
   // ──────────────────────────────────────────────
   // Step 3: Build prompt and call Claude
   // ──────────────────────────────────────────────
   const userPrompt = buildUserPrompt({ aggregation, themeDefs });
+  console.log('[CTA] Prompt length:', userPrompt.length, 'chars');
 
   const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
   let llmResponse;
+  const llmStart = Date.now();
   try {
     llmResponse = await anthropic.messages.create({
       model: MODEL,
       max_tokens: MAX_TOKENS,
+      temperature: TEMPERATURE,
       system: SYSTEM_PROMPT,
       messages: [
         { role: 'user', content: userPrompt }
       ]
     });
   } catch (err) {
-    return {
-      statusCode: 500,
-      headers,
-      body: JSON.stringify({ error: 'LLM call failed', detail: err.message })
-    };
+    console.error('[CTA] LLM call failed:', err.message);
+    return errorResponse(origin, 500, { error: 'LLM call failed', detail: err.message });
   }
+
+  const llmElapsed = ((Date.now() - llmStart) / 1000).toFixed(1);
+  console.log('[CTA] LLM completed in', llmElapsed, 'seconds');
+  console.log('[CTA] Stop reason:', llmResponse.stop_reason);
+  console.log('[CTA] Output tokens:', llmResponse.usage?.output_tokens);
 
   // Extract text content
   const responseText = llmResponse.content
@@ -295,54 +358,64 @@ exports.handler = async (event) => {
     ?.trim();
 
   if (!responseText) {
-    return {
-      statusCode: 500,
-      headers,
-      body: JSON.stringify({ error: 'Empty LLM response' })
-    };
+    return errorResponse(origin, 500, { error: 'Empty LLM response' });
   }
 
   // ──────────────────────────────────────────────
-  // Step 4: Parse + validate JSON
+  // Step 4: Check for truncation
   // ──────────────────────────────────────────────
+  if (looksTruncated(responseText, llmResponse.stop_reason)) {
+    console.error('[CTA] Response truncated. stop_reason:', llmResponse.stop_reason);
+    return errorResponse(origin, 500, {
+      error: 'LLM response was truncated (hit max_tokens)',
+      detail: `stop_reason: ${llmResponse.stop_reason}, output_tokens: ${llmResponse.usage?.output_tokens}`,
+      suggestion: 'Increase MAX_TOKENS in the function, or reduce findings/clusters count in prompt',
+      raw_response_tail: responseText.slice(-500)
+    });
+  }
+
+  // ──────────────────────────────────────────────
+  // Step 5: Parse + validate JSON
+  // ──────────────────────────────────────────────
+  const cleanedJSON = extractJSON(responseText);
+
+  if (!cleanedJSON) {
+    console.error('[CTA] Could not extract JSON from response');
+    return errorResponse(origin, 500, {
+      error: 'Could not extract JSON from LLM response',
+      raw_response_head: responseText.substring(0, 500)
+    });
+  }
+
   let report;
   try {
-    // Strip any accidental markdown fences
-    const cleaned = responseText
-      .replace(/^```json\s*/i, '')
-      .replace(/^```\s*/i, '')
-      .replace(/```\s*$/i, '')
-      .trim();
-    report = JSON.parse(cleaned);
+    report = JSON.parse(cleanedJSON);
   } catch (err) {
-    return {
-      statusCode: 500,
-      headers,
-      body: JSON.stringify({
-        error: 'LLM returned invalid JSON',
-        detail: err.message,
-        raw_response: responseText.substring(0, 500)
-      })
-    };
+    console.error('[CTA] JSON parse failed:', err.message);
+    return errorResponse(origin, 500, {
+      error: 'LLM returned invalid JSON',
+      detail: err.message,
+      raw_response_head: responseText.substring(0, 500),
+      cleaned_attempt_head: cleanedJSON.substring(0, 500)
+    });
   }
 
   const validationErrors = validateReport(report);
   if (validationErrors.length > 0) {
-    return {
-      statusCode: 500,
-      headers,
-      body: JSON.stringify({
-        error: 'Report failed validation',
-        validation_errors: validationErrors,
-        report  // include for debugging
-      })
-    };
+    console.error('[CTA] Validation errors:', validationErrors);
+    return errorResponse(origin, 500, {
+      error: 'Report failed validation',
+      validation_errors: validationErrors,
+      report
+    });
   }
 
   // ──────────────────────────────────────────────
-  // Step 5: Enrich response with metadata + theme defs
-  // (so frontend has everything needed to render)
+  // Step 6: Enrich response with metadata + theme defs
   // ──────────────────────────────────────────────
+  const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  console.log('[CTA] Total elapsed:', totalElapsed, 'seconds');
+
   const enriched = {
     report,
     metadata: {
@@ -350,7 +423,11 @@ exports.handler = async (event) => {
       model: MODEL,
       user_id: userId,
       sessions_analyzed: totalSessions,
-      cases_analyzed: aggregation.counts.total_cases || 0
+      cases_analyzed: aggregation.counts.total_cases || 0,
+      llm_elapsed_seconds: parseFloat(llmElapsed),
+      total_elapsed_seconds: parseFloat(totalElapsed),
+      output_tokens: llmResponse.usage?.output_tokens,
+      stop_reason: llmResponse.stop_reason
     },
     raw_data: {
       counts: aggregation.counts,
@@ -363,7 +440,7 @@ exports.handler = async (event) => {
 
   return {
     statusCode: 200,
-    headers,
+    headers: corsHeaders(origin),
     body: JSON.stringify(enriched)
   };
 };
