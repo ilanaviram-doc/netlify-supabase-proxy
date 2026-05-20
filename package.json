@@ -19,6 +19,7 @@
   },
   "homepage": "https://github.com/ilanaviram-doc/netlify-supabase-proxy#readme",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
     "@supabase/supabase-js": "^2.81.1"
   }
 }
