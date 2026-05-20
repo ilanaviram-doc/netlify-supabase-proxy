@@ -194,14 +194,13 @@ function extractJSON(text) {
 // ────────────────────────────────────────────────────────────
 // Detect if JSON looks truncated (Claude hit max_tokens mid-output)
 // ────────────────────────────────────────────────────────────
-function looksTruncated(text, stopReason) {
-  if (stopReason === 'max_tokens') return true;
-  if (!text) return false;
-
-  // Heuristic: if text ends mid-string or mid-array/object
-  const trimmed = text.trimEnd();
-  const lastChar = trimmed[trimmed.length - 1];
-  return lastChar !== '}' && lastChar !== ']';
+// Only consider response truncated if Claude explicitly says so via
+// stop_reason. We do NOT inspect the last character because Claude
+// sometimes wraps JSON in markdown fences (```) and trailing backticks
+// would create false positives. The extractJSON() function handles
+// any wrappers downstream.
+function looksTruncated(_text, stopReason) {
+  return stopReason === 'max_tokens';
 }
 
 // ────────────────────────────────────────────────────────────
