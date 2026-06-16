@@ -8,8 +8,8 @@ const VF_PROJECTS = {
         apiKey: 'VF.DM.69fe505e8e9fa3970cfc938a.ilBxGICI6rxlITZx'
     },
     psychodynamic_children: {
-        projectID: '69958e2496fd12fff66928c7',
-        apiKey: 'VF.DM.6996013bddce1f3281f671f5.fY8gv93hcf0wUSVv'
+        projectID: '6a2ea226e74a06bf3c62fc4f',
+        apiKey: 'VF.DM.6a3192fa072318856143926c.R4CgFPLBDHB5aQhF'
     },
     psychodynamic_parents: {
         projectID: '68d9462f0d7ce042ebb9af90',
