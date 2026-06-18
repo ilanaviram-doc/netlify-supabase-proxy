@@ -16,8 +16,8 @@ const VF_PROJECTS = {
         apiKey: 'VF.DM.6a33ba521a2e79eac047d33c.2srgfrtqwkkKCPoy'
     },
     integrative_parents: {
-        projectID: '69cebe9ab4c5bf250dcb39a9',
-        apiKey: 'VF.DM.69f3105938c8807f7157c4ba.fImYv3gSWBgBQKEM'
+        projectID: '6a33bc6683977c4645c5cef8',
+        apiKey: 'VF.DM.6a345b31f4297fdb1122e4ef.vxepxA49F4IBZK9u'
     },
     cbt: {
         projectID: '69958a4396fd12fff66927ea',
