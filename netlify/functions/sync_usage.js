@@ -12,8 +12,8 @@ const VF_PROJECTS = {
         apiKey: 'VF.DM.6a3192fa072318856143926c.R4CgFPLBDHB5aQhF'
     },
     psychodynamic_parents: {
-        projectID: '68d9462f0d7ce042ebb9af90',
-        apiKey: 'VF.DM.68d9706c1305d072a1df8ce6.53ui9DPMyvkQ9QRO'
+        projectID: '6a339fdf83977c4645c5cd07',
+        apiKey: 'VF.DM.6a33ba521a2e79eac047d33c.2srgfrtqwkkKCPoy'
     },
     integrative_parents: {
         projectID: '69cebe9ab4c5bf250dcb39a9',
