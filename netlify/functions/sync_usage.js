@@ -1,9 +1,7 @@
 const { createClient } = require('@supabase/supabase-js');
+
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-// ⚠️ SECURITY: the previous VF.DM keys were exposed in chat. Rotate each key in the
-// Voiceflow dashboard and paste the NEW value below (or better: move them to Netlify
-// env vars, e.g. apiKey: process.env.VF_KEY_PSYCHODYNAMIC_ADULTS).
 const VF_PROJECTS = {
     psychodynamic_adults: {
         projectID: '69f9ef9b565755ff6b8deda6',
@@ -17,7 +15,6 @@ const VF_PROJECTS = {
         projectID: '6a339fdf83977c4645c5cd07',
         apiKey: 'VF.DM.6a33ba521a2e79eac047d33c.2srgfrtqwkkKCPoy'
     },
-    },
     integrative_parents: {
         projectID: '6a33bc6683977c4645c5cef8',
         apiKey: 'VF.DM.6a345b31f4297fdb1122e4ef.vxepxA49F4IBZK9u'
@@ -28,10 +25,12 @@ const VF_PROJECTS = {
     },
     trauma: {
         projectID: '69a3f7f5c0c1216a818db914',
-        apiKey: 'VF.DM.PASTE_ROTATED_KEY_HERE'
+        apiKey: 'VF.DM.69ad21fb6ef184469efcd20a.Dws9LKtLUulD9OIS'
     }
 };
+
 const DEFAULT_AGENT = 'psychodynamic_adults';
+
 const SYSTEM_MESSAGE_PATTERNS = [
     'שלום', 'ברוכים הבאים', 'ברוך הבא', 'ברוכה הבאה',
     'היי', 'hello', 'welcome', 'hi there',
@@ -41,22 +40,24 @@ const SYSTEM_MESSAGE_PATTERNS = [
     'בחר אפשרות', 'בחרי אפשרות', 'לחץ על', 'לחצי על',
     'להתראות', 'ביי', 'תודה שפנית', 'נשמח לעזור שוב'
 ];
+
 const BUTTON_RESPONSE_PATTERNS = [
     'כן', 'לא', 'אישור', 'ביטול', 'סגור', 'המשך',
     'הבא', 'חזור', 'התחל', 'סיים', 'שלח', 'אשר',
     'ok', 'yes', 'no', 'cancel', 'start', 'continue',
     'back', 'next', 'done', 'submit'
 ];
+
 function isSystemMessage(content, logType) {
     if (!content || content.length === 0) return { skip: true, cost: 0 };
-
+    
     const contentLower = content.toLowerCase().trim();
-
+    
     if (logType === 'action' && contentLower.length < 5) {
         console.log(`🆓 FREE: Very short user message (${contentLower.length} chars)`);
         return { skip: true, cost: 0 };
     }
-
+    
     if (logType === 'action' && contentLower.length <= 15) {
         for (const pattern of BUTTON_RESPONSE_PATTERNS) {
             if (contentLower === pattern.toLowerCase() || contentLower.includes(pattern.toLowerCase())) {
@@ -65,16 +66,17 @@ function isSystemMessage(content, logType) {
             }
         }
     }
+
     if (logType === 'action') {
         console.log(`🆓 FREE: Button label click ("${content}")`);
         return { skip: true, cost: 0 };
     }
-
+    
     if (logType === 'trace' && contentLower.length < 50) {
         console.log(`💰 SYSTEM: Short bot message (${contentLower.length} chars) = 1 credit`);
         return { skip: false, cost: 1 };
     }
-
+    
     if (logType === 'trace') {
         for (const pattern of SYSTEM_MESSAGE_PATTERNS) {
             if (contentLower.includes(pattern.toLowerCase())) {
@@ -83,15 +85,17 @@ function isSystemMessage(content, logType) {
             }
         }
     }
-
+    
     return { skip: false, cost: null };
 }
+
 function extractTextFromLog(log) {
     try {
         if (log.type === 'trace' && log.data && log.data.payload) {
             if (log.data.payload.message) return log.data.payload.message;
             if (log.data.payload.slate) return JSON.stringify(log.data.payload.slate);
         }
+
         if (log.type === 'action' && log.data && log.data.payload) {
             if (log.data.payload.payload && typeof log.data.payload.payload === 'string') {
                 return log.data.payload.payload;
@@ -102,48 +106,8 @@ function extractTextFromLog(log) {
             if (typeof log.data.payload === 'string') return log.data.payload;
         }
     } catch (e) { return ""; }
-
+    
     return "";
-}
-
-// ─── NEW (shadow): real Voiceflow cost of the session — ALL components VF bills ───
-// Sums the actual billed credits (model + hosting + voice) from the transcript logs.
-// vfCreditsVoice is only a sub-total of the TTS slice, for transparency — not a
-// separate charge. ai-result entries carry inputCredits/outputCredits and have NO
-// VoiceflowCreditConsumption, so summing only where it exists avoids double counting.
-function computeVfCost(data) {
-    const t = (data && data.transcript) || {};
-    const logs = t.logs || [];
-
-    let vfCreditsTotal = 0;   // model + hosting + voice (real VF billed credits)
-    let vfCreditsVoice = 0;   // the TTS slice only
-    for (const log of logs) {
-        const payload = log && log.data && log.data.payload;
-        const meta = payload && payload.metadata;
-        const vcc = meta && meta.VoiceflowCreditConsumption;
-        if (vcc && typeof vcc.total === 'number') {
-            vfCreditsTotal += vcc.total;
-            const isTTS = (meta.model === 'TTS') || (payload.context === 'TTS');
-            if (isTTS) vfCreditsVoice += vcc.total;
-        }
-    }
-
-    // Cross-check only (different UNIT from the billed credits above).
-    let vfCreditsProp = null;
-    let modelsToCredit = null;
-    const props = t.properties || [];
-    const cp = props.find(p => p && p.name === 'credits');
-    if (cp) {
-        vfCreditsProp = Number(cp.value) || 0;
-        modelsToCredit = (cp.metadata && cp.metadata.modelsToCredit) || null;
-    }
-
-    return {
-        vfCreditsTotal: Math.round(vfCreditsTotal * 10000) / 10000,
-        vfCreditsVoice: Math.round(vfCreditsVoice * 10000) / 10000,
-        vfCreditsProp,
-        modelsToCredit
-    };
 }
 
 async function logCreditTransaction(params) {
@@ -152,6 +116,7 @@ async function logCreditTransaction(params) {
         session_id, agent_type = null, transaction_type = 'deduction',
         source = 'voiceflow', description = null, metadata = null
     } = params;
+
     try {
         const { error } = await supabase
             .from('credit_logs')
@@ -161,6 +126,7 @@ async function logCreditTransaction(params) {
                 transaction_type, balance_before, balance_after, source,
                 voiceflow_session_id: session_id, agent_type, description, metadata
             });
+
         if (error) {
             console.error('❌ Failed to log credit transaction:', error.message);
         } else {
@@ -170,64 +136,82 @@ async function logCreditTransaction(params) {
         console.error('❌ Error logging transaction:', err.message);
     }
 }
+
 exports.handler = async (event) => {
   // ✅ תיקון CORS: דומיין ספציפי במקום wildcard
   const origin = event.headers.origin || event.headers.Origin || '';
   const allowedOrigins = ['https://clinikai.co', 'https://www.clinikai.co'];
   const allowOrigin = allowedOrigins.includes(origin) ? origin : 'https://clinikai.co';
+
   const headers = {
     'Access-Control-Allow-Origin': allowOrigin,
     'Access-Control-Allow-Headers': 'Content-Type',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
     'Access-Control-Allow-Credentials': 'true'
   };
+
   if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers, body: '' };
+
   try {
     const { session_id, user_id, agent_type } = JSON.parse(event.body);
-    if (!session_id || !user_id) return {
-        statusCode: 400, headers,
-        body: JSON.stringify({ error: "Missing params" })
+
+    if (!session_id || !user_id) return { 
+        statusCode: 400, headers, 
+        body: JSON.stringify({ error: "Missing params" }) 
     };
+
     const resolvedAgent = agent_type && VF_PROJECTS[agent_type] ? agent_type : DEFAULT_AGENT;
     const VF_PROJECT_ID = VF_PROJECTS[resolvedAgent].projectID;
     const VF_API_KEY = VF_PROJECTS[resolvedAgent].apiKey;
+
     console.log(`🔍 [SERVER] Syncing for UserID: ${session_id} | Agent: ${resolvedAgent} | Project: ${VF_PROJECT_ID}`);
+
     const searchUrl = `https://analytics-api.voiceflow.com/v1/transcript/project/${VF_PROJECT_ID}`;
-    const searchResponse = await fetch(searchUrl, {
-        method: 'POST',
+    const searchResponse = await fetch(searchUrl, { 
+        method: 'POST', 
         headers: { 'authorization': VF_API_KEY, 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionID: session_id })
     });
+
     if (!searchResponse.ok) {
         console.log(`❌ Search Error: ${searchResponse.status}`);
         return { statusCode: 200, headers, body: JSON.stringify({ success: true, status: "pending_search" }) };
     }
+
     const searchResult = await searchResponse.json();
     const transcriptsList = searchResult.transcripts || [];
+
     if (transcriptsList.length === 0) {
         console.log("⏳ VF: No transcripts found yet.");
         return { statusCode: 200, headers, body: JSON.stringify({ success: true, status: "pending_index" }) };
     }
+
     transcriptsList.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     const transcriptID = transcriptsList[0]._id || transcriptsList[0].id;
     console.log(`✅ Found Transcript ID: ${transcriptID}`);
+
     const detailUrl = `https://analytics-api.voiceflow.com/v1/transcript/${transcriptID}?filterConversation=false`;
     const detailResponse = await fetch(detailUrl, { headers: { 'authorization': VF_API_KEY } });
+
     if (!detailResponse.ok) return { statusCode: 200, headers, body: JSON.stringify({ success: true }) };
+
     const data = await detailResponse.json();
-    const logs = data.transcript?.logs || [];
+    const logs = data.transcript?.logs || []; 
+
     console.log(`🐛 Raw Logs Found: ${logs.length}`);
+
     let totalScore = 0;
     let turnCount = 0;
     let freeCount = 0;
     let systemCount = 0;
     let totalWordCount = 0;
     let firstUserMessageSeen = false;
+
     logs.forEach(log => {
         const content = extractTextFromLog(log);
-
-        if (content && content.length > 1) {
-
+        
+        if (content && content.length > 1) { 
+            
             if (!firstUserMessageSeen) {
                 if (log.type === 'action') {
                     firstUserMessageSeen = true;
@@ -237,116 +221,109 @@ exports.handler = async (event) => {
                     return;
                 }
             }
-
+            
             const messageCheck = isSystemMessage(content, log.type);
-
+            
             if (messageCheck.skip) {
                 freeCount++;
                 return;
             }
-
+            
             if (messageCheck.cost === 1) {
                 systemCount++;
                 totalScore += 1;
                 return;
             }
-
+            
             turnCount++;
             const wordCount = content.trim().split(/\s+/).length;
             totalWordCount += wordCount;
-
+            
             const baseCost = Math.max(1, Math.ceil(wordCount / 20));
             console.log(`💰 Cost calc: ${wordCount} words = ${baseCost} credits`);
-
+            
             let itemCost = 0;
             if (log.type === 'trace') {
                 itemCost = baseCost;
             } else if (log.type === 'action') {
-                itemCost = Math.ceil(baseCost * 0.5);
+                itemCost = Math.ceil(baseCost * 0.5); 
             }
-
+            
             totalScore += itemCost;
         }
     });
+
     const finalCalculatedCost = Math.ceil(totalScore);
-
-    // ─── NEW (shadow): compute the real VF cost ALONGSIDE the word-count cost. ───
-    // RATIO stays 0/unset until calibrated against a real invoice, so this NEVER
-    // changes what gets charged below — it is recorded only. Reverting = leave it 0.
-    const vfCost = computeVfCost(data);
-    const VF_COST_RATIO = Number(process.env.VF_COST_RATIO || 0);   // app-credits per 1 VF billed-credit
-    const newCostPreview = VF_COST_RATIO > 0
-        ? Math.ceil(vfCost.vfCreditsTotal * VF_COST_RATIO)
-        : null;
-    console.log(
-        `🕵️ SHADOW  old(wordcount)=${finalCalculatedCost}  ` +
-        `vfCredits=${vfCost.vfCreditsTotal} (voice ${vfCost.vfCreditsVoice})  ` +
-        `newPreview=${newCostPreview}  agent=${resolvedAgent}`
-    );
-    // ─── charging below STILL uses finalCalculatedCost — do not change that yet. ───
-
     console.log(`📊 Analysis: ${turnCount} paid + ${systemCount} system (1 each) + ${freeCount} free. Total: ${finalCalculatedCost} | Agent: ${resolvedAgent}`);
+
     const { data: sessionRecord } = await supabase
         .from('processed_sessions')
         .select('charged_amount')
         .eq('session_id', transcriptID)
         .single();
+
     const alreadyPaid = sessionRecord ? sessionRecord.charged_amount : 0;
     const amountToChargeNow = finalCalculatedCost - alreadyPaid;
+
     if (amountToChargeNow <= 0) {
         return { statusCode: 200, headers, body: JSON.stringify({ success: true, message: "Up to date" }) };
     }
+
     console.log(`💳 CHARGING: ${amountToChargeNow} credits [${resolvedAgent}]`);
+
     const { data: userCredits } = await supabase
         .from('user_credits')
         .select('remaining_credits')
         .eq('user_id', user_id)
         .single();
+
     const { data: userProfile } = await supabase
         .from('profiles')
         .select('email')
         .eq('id', user_id)
         .single();
+
     if (userCredits) {
         const balanceBefore = userCredits.remaining_credits;
         const newBalance = balanceBefore - amountToChargeNow;
-
+        
         const { error: creditError } = await supabase
             .from('user_credits')
             .update({ remaining_credits: newBalance })
             .eq('user_id', user_id);
-
+        
         if (creditError) {
             console.error('❌ CRITICAL: user_credits update FAILED:', creditError.message);
-            return {
-                statusCode: 500, headers,
-                body: JSON.stringify({ error: "Credit deduction failed", detail: creditError.message })
+            return { 
+                statusCode: 500, headers, 
+                body: JSON.stringify({ error: "Credit deduction failed", detail: creditError.message }) 
             };
         }
-
+        
         console.log(`✅ user_credits updated: ${balanceBefore} → ${newBalance}`);
-
+        
         const { error: profileError } = await supabase
             .from('profiles')
             .update({ credits: newBalance })
             .eq('id', user_id);
-
+        
         if (profileError) {
             console.warn('⚠️ profiles sync failed (non-critical):', profileError.message);
         }
-
+        
         const { error: sessionError } = await supabase
             .from('processed_sessions')
-            .upsert({
+            .upsert({ 
                 session_id: transcriptID,
-                user_id: user_id,
+                user_id: user_id, 
                 charged_amount: finalCalculatedCost,
                 last_sync: new Date().toISOString()
             }, { onConflict: 'session_id' });
-
+        
         if (sessionError) {
             console.error('⚠️ WARNING: processed_sessions update FAILED:', sessionError.message);
         }
+
         await logCreditTransaction({
             user_id,
             user_email: userProfile?.email || null,
@@ -367,32 +344,24 @@ exports.handler = async (event) => {
                 free_count: freeCount,
                 total_word_count: totalWordCount,
                 already_paid: alreadyPaid,
-                total_calculated: finalCalculatedCost,
-
-                // ─── NEW (shadow): real-VF-cost comparison, recorded per session ───
-                shadow: {
-                    old_wordcount_cost: finalCalculatedCost,
-                    vf_credits_total:   vfCost.vfCreditsTotal,
-                    vf_credits_voice:   vfCost.vfCreditsVoice,
-                    vf_credits_prop:    vfCost.vfCreditsProp,
-                    models_to_credit:   vfCost.modelsToCredit,
-                    new_cost_preview:   newCostPreview
-                }
+                total_calculated: finalCalculatedCost
             }
         });
-        return {
-            statusCode: 200, headers,
-            body: JSON.stringify({
-                success: true,
-                charged: amountToChargeNow,
-                new_balance: newBalance,
-                logged: true
-            })
-        };
-    }
 
+        return { 
+            statusCode: 200, headers, 
+            body: JSON.stringify({ 
+                success: true, 
+                charged: amountToChargeNow,
+                new_balance: newBalance, 
+                logged: true
+            }) 
+        };
+    } 
+    
     console.error(`❌ User not found in user_credits: ${user_id}`);
     return { statusCode: 404, headers, body: JSON.stringify({ error: "User not found" }) };
+
   } catch (err) {
     console.error("🔥 Server Error:", err);
     return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
