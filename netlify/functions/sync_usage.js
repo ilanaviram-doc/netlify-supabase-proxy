@@ -15,11 +15,11 @@ const VF_PROJECTS = {
     },
     integrative_adults: {
         projectID: '6a52510dd7db15dd8376af35',
-        apiKey: 'PASTE_INTEGRATIVE_ADULTS_VF_API_KEY' // ← להזין את מפתח ה-API של פרויקט "אינטגרטיבי מבוגרים"
+        apiKey: 'VF.DM.6a57e8565e499fdf0a8205dd.vlg8u5MKqB1XhtEz' // ← להזין את מפתח ה-API של פרויקט "אינטגרטיבי מבוגרים"
     },
     integrative_children: {
-        projectID: '6a2ea226e74a06bf3c62fc4f', // ⚠️ זהה ל-psychodynamic_children — יש לאמת שזה המזהה הנכון
-        apiKey: 'PASTE_INTEGRATIVE_CHILDREN_VF_API_KEY' // ← להזין את מפתח ה-API של פרויקט "אינטגרטיבי ילדים ונוער"
+        projectID: '6a525139d7db15dd8376af40',
+        apiKey: 'VF.DM.6a56a1b34b2aae802d58dc3e.sxudJ8JTOUQj70yJ' // ← להזין את מפתח ה-API של פרויקט "אינטגרטיבי ילדים ונוער"
     },
     integrative_parents: {
         projectID: '6a33bc6683977c4645c5cef8',
