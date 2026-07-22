@@ -25,7 +25,7 @@ function monthStartISO() {
   const now = new Date();
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
 }
-function num(v) { const n = Number(v); return isNaN(n) ? 0 : n; }
+function num(v) { const n = Number(String(v == null ? '' : v).replace(/[,\s]/g, '')); return isNaN(n) ? 0 : n; }
 
 // Read the first defined env var from a list of possible names.
 function envAny(names) {
@@ -98,8 +98,8 @@ async function getOpenAI() {
     const start = Math.floor(new Date(monthStartISO()).getTime() / 1000);
     const u = new URL('https://api.openai.com/v1/organization/costs');
     u.searchParams.set('start_time', String(start));
-    u.searchParams.set('limit', '180');
-    const r = await fetchT(u, { headers: { Authorization: `Bearer ${key}` } }, 7000);
+    u.searchParams.set('limit', '31'); // month-to-date daily buckets — smaller = faster
+    const r = await fetchT(u, { headers: { Authorization: `Bearer ${key}` } }, 9000);
     if (!r.ok) throw new Error(httpErr(r.status));
     const j = await r.json();
     let usd = 0;
@@ -147,18 +147,22 @@ exports.handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: CORS, body: '' };
 
   const auth = event.headers.authorization || event.headers.Authorization;
-  if (!(await callerIsValid(auth))) {
+
+  // Run the auth check CONCURRENTLY with the provider calls, so the slow OpenAI
+  // cost API gets the full time budget within Netlify's function limit rather
+  // than auth-time + provider-time stacking up and tripping a platform timeout.
+  const authP = callerIsValid(auth);
+  const servicesP = Promise.all([
+    withTimeout(getVoiceflow(), 9500, 'voiceflow'),
+    withTimeout(getOpenAI(),    9500, 'openai'),
+    withTimeout(getAnthropic(), 9500, 'anthropic'),
+    withTimeout(getResend(),    8000, 'resend')
+  ]);
+
+  if (!(await authP)) {
     return { statusCode: 401, headers: CORS, body: JSON.stringify({ error: 'unauthorized' }) };
   }
-
-  // Each provider is time-boxed so a slow one (e.g. Voiceflow's many projects)
-  // can never make the whole function time out and break the other cards.
-  const services = await Promise.all([
-    withTimeout(getVoiceflow(), 8500, 'voiceflow'),
-    withTimeout(getOpenAI(),    7500, 'openai'),
-    withTimeout(getAnthropic(), 7500, 'anthropic'),
-    withTimeout(getResend(),    7500, 'resend')
-  ]);
+  const services = await servicesP;
 
   return {
     statusCode: 200,
