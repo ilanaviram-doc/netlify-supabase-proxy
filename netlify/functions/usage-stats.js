@@ -51,6 +51,41 @@ function withTimeout(promise, ms, key) {
   ]);
 }
 
+// --- Last-good-value cache (Supabase table usage_cache) ----------------------
+// A slow provider (OpenAI's cost API) can time out; instead of showing an error
+// we serve the last value we successfully fetched.
+async function readCache(service) {
+  try {
+    const sbUrl = process.env.SUPABASE_URL, svc = envAny(['SUPABASE_SERVICE_ROLE_KEY']);
+    if (!sbUrl || !svc) return null;
+    const r = await fetchT(`${sbUrl}/rest/v1/usage_cache?service=eq.${service}&select=consumed,unit,updated_at`,
+      { headers: { apikey: svc, Authorization: `Bearer ${svc}` } }, 1800);
+    if (!r.ok) return null;
+    const rows = await r.json();
+    return (rows && rows[0]) ? rows[0] : null;
+  } catch { return null; }
+}
+async function writeCache(service, consumed, unit) {
+  try {
+    const sbUrl = process.env.SUPABASE_URL, svc = envAny(['SUPABASE_SERVICE_ROLE_KEY']);
+    if (!sbUrl || !svc) return;
+    await fetchT(`${sbUrl}/rest/v1/usage_cache?on_conflict=service`, {
+      method: 'POST',
+      headers: { apikey: svc, Authorization: `Bearer ${svc}`, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' },
+      body: JSON.stringify([{ service, consumed, unit, updated_at: new Date().toISOString() }])
+    }, 3000);
+  } catch { /* best-effort */ }
+}
+function agoText(iso) {
+  try {
+    const m = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+    if (m < 60) return 'עודכן לפני ' + m + ' דק׳';
+    const h = Math.round(m / 60);
+    if (h < 24) return 'עודכן לפני ' + h + ' שע׳';
+    return 'עודכן לפני ' + Math.round(h / 24) + ' ימים';
+  } catch { return 'ערך שמור'; }
+}
+
 // --- Validate the caller is a logged-in admin (Supabase JWT) -----------------
 async function callerIsValid(auth) {
   try {
@@ -94,12 +129,13 @@ async function getAnthropic() {
 async function getOpenAI() {
   const key = envAny(['OPENAI_ADMIN_KEY', 'OPENAI_API_KEY']);
   if (!key) return { key: 'openai', status: 'not-configured' };
+  const limit = process.env.OPENAI_ORG_LIMIT_USD ? num(process.env.OPENAI_ORG_LIMIT_USD) : null;
   try {
     const start = Math.floor(new Date(monthStartISO()).getTime() / 1000);
     const u = new URL('https://api.openai.com/v1/organization/costs');
     u.searchParams.set('start_time', String(start));
     u.searchParams.set('limit', '31'); // month-to-date daily buckets — smaller = faster
-    const r = await fetchT(u, { headers: { Authorization: `Bearer ${key}` } }, 9000);
+    const r = await fetchT(u, { headers: { Authorization: `Bearer ${key}` } }, 7500);
     if (!r.ok) throw new Error(httpErr(r.status));
     const j = await r.json();
     let usd = 0;
@@ -107,22 +143,82 @@ async function getOpenAI() {
       const a = res.amount;
       usd += typeof a === 'object' && a !== null ? num(a.value) : num(a);
     }));
-    const limit = process.env.OPENAI_ORG_LIMIT_USD ? num(process.env.OPENAI_ORG_LIMIT_USD) : null;
-    return { key: 'openai', status: 'ok', unit: 'usd', consumed: Math.round(usd * 100) / 100,
+    const consumed = Math.round(usd * 100) / 100;
+    await writeCache('openai', consumed, 'usd'); // remember last good value
+    return { key: 'openai', status: 'ok', unit: 'usd', consumed,
              limit, periodLabel: 'עלות מתחילת החודש', note: 'תמלול קולי (STT/VTT)' };
-  } catch (e) { return { key: 'openai', status: 'error', error: e.message }; }
+  } catch (e) {
+    // Live call was slow/failed — serve the last value we cached, so the card
+    // shows a number instead of a timeout error.
+    const c = await readCache('openai');
+    if (c) return { key: 'openai', status: 'ok', unit: c.unit || 'usd', consumed: num(c.consumed),
+                    limit, periodLabel: 'עלות מתחילת החודש', note: agoText(c.updated_at) };
+    return { key: 'openai', status: 'error', error: e.message };
+  }
 }
 
-// --- Voiceflow: WORKSPACE credit usage this month (sum across all projects) ---
-// Voiceflow exposes credit usage ONLY per-project, so we sum credit_usage over
-// --- Voiceflow: shortcut card to the Billing page ----------------------------
-// Voiceflow's API has NO dollar/cost metric (only credits, and only per single
-// project), so a live $ figure isn't possible. We link straight to the Billing
-// page where the real $ is shown. Override the URL with VOICEFLOW_BILLING_URL.
+// --- Voiceflow: PER-PROJECT usage breakdown ----------------------------------
+// Voiceflow keys are project-scoped, so we keep a project_id -> VF.DM key map in
+// the Supabase table `voiceflow_project_keys` (read here with the service_role
+// key — the keys are secret and RLS blocks everyone else). For each project we
+// query credit_usage and report interactions + credits, sorted by activity.
 async function getVoiceflow() {
-  const url = process.env.VOICEFLOW_BILLING_URL || 'https://creator.voiceflow.com/workspace/VzElM4eVkL/projects';
-  return { key: 'voiceflow', status: 'link', url, linkLabel: 'צפה בעלות ב-Voiceflow',
-           note: 'עלות $ זמינה רק בדשבורד של Voiceflow' };
+  const billingUrl = process.env.VOICEFLOW_BILLING_URL || 'https://creator.voiceflow.com/workspace/VzElM4eVkL/projects';
+  const linkCard = (note) => ({ key: 'voiceflow', status: 'link', url: billingUrl,
+                                linkLabel: 'צפה בעלות ב-Voiceflow', note });
+
+  const svcKey = envAny(['SUPABASE_SERVICE_ROLE_KEY']);
+  const sbUrl = process.env.SUPABASE_URL;
+  if (!svcKey || !sbUrl) return linkCard('חסר SUPABASE_SERVICE_ROLE_KEY');
+
+  try {
+    // Read the project->key map (secret keys → service_role only).
+    const rq = await fetchT(`${sbUrl}/rest/v1/voiceflow_project_keys?select=project_id,name,dm_key,enabled`,
+      { headers: { apikey: svcKey, Authorization: `Bearer ${svcKey}` } }, 6000);
+    if (!rq.ok) throw new Error('supabase ' + rq.status);
+    const rows = await rq.json();
+    const active = (rows || []).filter(x => x.enabled !== false && x.dm_key && String(x.dm_key).trim());
+    if (!active.length) return linkCard('הוסף מפתחות בטבלת voiceflow_project_keys');
+
+    const startTime = monthStartISO();
+    const endTime = new Date().toISOString();
+
+    async function projectUsage(row) {
+      let credits = 0, interactions = 0, cursor, pages = 0;
+      do {
+        const filter = { projectID: row.project_id, startTime, endTime, limit: 500 };
+        if (cursor) filter.cursor = cursor;
+        const rr = await fetchT('https://analytics-api.voiceflow.com/v2/query/usage', {
+          method: 'POST',
+          headers: { authorization: row.dm_key, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ data: { name: 'credit_usage', filter } })
+        }, 6000);
+        if (!rr.ok) throw new Error(httpErr(rr.status));
+        const j = await rr.json();
+        const items = j.items || j.data || [];
+        items.forEach(it => { const c = num(it.count ?? it.value); credits += c; if (it.type === 'interaction') interactions += c; });
+        cursor = (items.length >= 500 && j.cursor) ? j.cursor : undefined;
+        pages++;
+      } while (cursor && pages < 25);
+      return { name: row.name || row.project_id, credits, interactions };
+    }
+
+    const settled = await Promise.allSettled(active.map(projectUsage));
+    const items = settled.filter(s => s.status === 'fulfilled').map(s => s.value)
+                         .sort((a, b) => (b.interactions - a.interactions) || (b.credits - a.credits));
+    const failed = settled.filter(s => s.status === 'rejected').length;
+    if (!items.length) {
+      const w = settled.find(s => s.status === 'rejected');
+      return linkCard('כל הפרויקטים נכשלו: ' + (w ? String((w.reason && w.reason.message) || w.reason) : ''));
+    }
+    return {
+      key: 'voiceflow', status: 'breakdown', unit: 'credits',
+      total: items.reduce((a, b) => a + b.credits, 0),
+      totalInteractions: items.reduce((a, b) => a + b.interactions, 0),
+      items, url: billingUrl, linkLabel: 'צפה בעלות ב-Voiceflow',
+      note: items.length + ' פרויקטים' + (failed ? ' · ' + failed + ' נכשלו' : '')
+    };
+  } catch (e) { return linkCard(e.message); }
 }
 
 // --- Resend: emails sent this month ------------------------------------------
