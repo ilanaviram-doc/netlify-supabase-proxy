@@ -180,8 +180,14 @@ async function getVoiceflow() {
     const active = (rows || []).filter(x => x.enabled !== false && x.dm_key && String(x.dm_key).trim());
     if (!active.length) return linkCard('הוסף מפתחות בטבלת voiceflow_project_keys');
 
-    const startTime = monthStartISO();
-    const endTime = new Date().toISOString();
+    // Align to the Voiceflow BILLING CYCLE, not the calendar month (the dashboard
+    // counts from the billing day). Default cycle day 17; override VOICEFLOW_CYCLE_DAY.
+    const cycleDay = Math.min(28, Math.max(1, parseInt(process.env.VOICEFLOW_CYCLE_DAY || '17', 10) || 17));
+    const nowD = new Date();
+    let cs = new Date(Date.UTC(nowD.getUTCFullYear(), nowD.getUTCMonth(), cycleDay, 0, 0, 0));
+    if (nowD.getUTCDate() < cycleDay) cs = new Date(Date.UTC(nowD.getUTCFullYear(), nowD.getUTCMonth() - 1, cycleDay, 0, 0, 0));
+    const startTime = cs.toISOString();
+    const endTime = nowD.toISOString();
 
     async function projectUsage(row) {
       let credits = 0, interactions = 0, cursor, pages = 0, dbg = '';
@@ -222,23 +228,28 @@ async function getVoiceflow() {
       try { return { ok: true, ...(await projectUsage(r)) }; }
       catch (e) { return { ok: false, name: r.name || r.project_id, error: (e && e.message) || String(e) }; }
     }));
-    const items = results.filter(x => x.ok).map(x => ({ name: x.name, credits: x.credits, interactions: x.interactions }))
-                         .sort((a, b) => (b.interactions - a.interactions) || (b.credits - a.credits));
+    // Voiceflow's API has no $ metric — convert credits to dollars at the plan
+    // rate ($0.005/credit by default; override with VOICEFLOW_USD_PER_CREDIT).
+    const rate = num(process.env.VOICEFLOW_USD_PER_CREDIT || '0.005');
+    const items = results.filter(x => x.ok).map(x => ({
+      name: x.name, credits: x.credits, interactions: x.interactions,
+      dollars: Math.round(x.credits * rate * 100) / 100
+    })).sort((a, b) => (b.dollars - a.dollars) || (b.interactions - a.interactions));
     const failedList = results.filter(x => !x.ok);
     if (!items.length) {
       return linkCard('כל הפרויקטים נכשלו: ' + (failedList[0] ? failedList[0].error : ''));
     }
-    const total = items.reduce((a, b) => a + b.credits, 0);
-    let note = items.length + ' פרויקטים';
+    const totalCredits = items.reduce((a, b) => a + b.credits, 0);
+    let note = items.length + ' פרויקטים · מחזור מ-' + cycleDay + ' לחודש · לפי $' + rate + '/קרדיט (הערכה)';
     if (failedList.length) note += ' · נכשלו: ' + failedList.map(f => f.name).join(', ');
-    // If everything came back empty, expose the raw response shape so we can see why.
-    if (total === 0) {
+    if (totalCredits === 0) {
       const firstOk = results.find(x => x.ok && x.dbg);
       if (firstOk) note += ' · debug: ' + firstOk.dbg;
     }
     return {
-      key: 'voiceflow', status: 'breakdown', unit: 'credits',
-      total, totalInteractions: items.reduce((a, b) => a + b.interactions, 0),
+      key: 'voiceflow', status: 'breakdown', unit: 'usd',
+      total: Math.round(totalCredits * rate * 100) / 100,
+      totalCredits, totalInteractions: items.reduce((a, b) => a + b.interactions, 0),
       items, url: billingUrl, linkLabel: 'צפה בעלות ב-Voiceflow', note
     };
   } catch (e) { return linkCard(e.message); }
