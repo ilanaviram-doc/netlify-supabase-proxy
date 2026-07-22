@@ -65,13 +65,19 @@ async function callerIsValid(auth) {
 // --- Anthropic: month-to-date cost (Admin Cost Report) -----------------------
 async function getAnthropic() {
   const key = envAny(['ANTHROPIC_ADMIN_KEY', 'ANTHROPIC_API_KEY']);
-  if (!key) return { key: 'anthropic', status: 'not-configured' };
+  // Individual (non-Organization) accounts can't create an Admin key, so the cost
+  // API is unreachable — fall back to a shortcut card to the console usage page.
+  const consoleUrl = process.env.ANTHROPIC_USAGE_URL || 'https://platform.claude.com/dashboard';
+  const linkCard = (note) => ({ key: 'anthropic', status: 'link', url: consoleUrl,
+                                linkLabel: 'צפה בעלות ב-Anthropic', note });
+  if (!key) return linkCard('דרוש Admin key לנתון חי');
   try {
     const u = new URL('https://api.anthropic.com/v1/organizations/cost_report');
     u.searchParams.set('starting_at', monthStartISO());
     u.searchParams.set('bucket_width', '1d');
     const r = await fetchT(u, { headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' } }, 7000);
-    if (!r.ok) throw new Error(httpErr(r.status));
+    if (r.status === 401 || r.status === 403) return linkCard('דרוש Admin key לנתון חי');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
     let usd = 0;
     (j.data || []).forEach(bucket => (bucket.results || []).forEach(res => {
@@ -109,52 +115,14 @@ async function getOpenAI() {
 
 // --- Voiceflow: WORKSPACE credit usage this month (sum across all projects) ---
 // Voiceflow exposes credit usage ONLY per-project, so we sum credit_usage over
-// every project ID. Endpoint: POST https://analytics-api.voiceflow.com/v2/query/usage
+// --- Voiceflow: shortcut card to the Billing page ----------------------------
+// Voiceflow's API has NO dollar/cost metric (only credits, and only per single
+// project), so a live $ figure isn't possible. We link straight to the Billing
+// page where the real $ is shown. Override the URL with VOICEFLOW_BILLING_URL.
 async function getVoiceflow() {
-  const key = envAny(['VOICEFLOW_API_KEY', 'VF_API_KEY', 'VOICEFLOW_DM_API_KEY']);
-  const idsRaw = envAny(['VOICEFLOW_PROJECT_IDS', 'VOICEFLOW_PROJECT_ID', 'VF_PROJECT_ID']);
-  if (!key || !idsRaw) return { key: 'voiceflow', status: 'not-configured' };
-
-  const ids = idsRaw.split(',').map(s => s.trim()).filter(Boolean);
-  const startTime = monthStartISO();
-  const endTime = new Date().toISOString();
-
-  async function projectCredits(projectID) {
-    let total = 0, cursor, pages = 0;
-    do {
-      const filter = { projectID, startTime, endTime, limit: 500 };
-      if (cursor) filter.cursor = cursor;
-      const r = await fetchT('https://analytics-api.voiceflow.com/v2/query/usage', {
-        method: 'POST',
-        headers: { authorization: key, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ data: { name: 'credit_usage', filter } })
-      }, 6000);
-      if (!r.ok) throw new Error(httpErr(r.status));
-      const j = await r.json();
-      const items = j.items || j.data || [];
-      items.forEach(it => { total += num(it.count ?? it.value); });
-      cursor = (items.length >= 500 && j.cursor) ? j.cursor : undefined;
-      pages++;
-    } while (cursor && pages < 25);
-    return total;
-  }
-
-  // Query every project, but DON'T hide failures: if they all fail (e.g. the key
-  // can't read these projects) surface the reason instead of a misleading 0.
-  const settled = await Promise.allSettled(ids.map(id => projectCredits(id)));
-  const okOnes = settled.filter(s => s.status === 'fulfilled');
-  const failed = settled.filter(s => s.status === 'rejected');
-
-  if (okOnes.length === 0) {
-    const why = failed.length ? String((failed[0].reason && failed[0].reason.message) || failed[0].reason) : 'no data';
-    return { key: 'voiceflow', status: 'error', error: 'כל הפרויקטים נכשלו: ' + why };
-  }
-
-  const consumed = okOnes.reduce((a, s) => a + s.value, 0);
-  const limit = envAny(['VOICEFLOW_CREDIT_LIMIT']) ? num(envAny(['VOICEFLOW_CREDIT_LIMIT'])) : null;
-  return { key: 'voiceflow', status: 'ok', unit: 'credits', consumed, limit,
-           periodLabel: 'קרדיטים מתחילת החודש (כל הפרויקטים)',
-           note: okOnes.length + '/' + ids.length + ' פרויקטים' + (failed.length ? ' (חלק נכשלו)' : '') };
+  const url = process.env.VOICEFLOW_BILLING_URL || 'https://creator.voiceflow.com/workspace/VzElM4eVkL/projects';
+  return { key: 'voiceflow', status: 'link', url, linkLabel: 'צפה בעלות ב-Voiceflow',
+           note: 'עלות $ זמינה רק בדשבורד של Voiceflow' };
 }
 
 // --- Resend: emails sent this month ------------------------------------------
