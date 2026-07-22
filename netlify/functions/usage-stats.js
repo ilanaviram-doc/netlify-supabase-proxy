@@ -14,8 +14,8 @@
 //   OPENAI_ADMIN_KEY        Admin API key (starts with sk-admin...)
 //   OPENAI_ORG_LIMIT_USD    (optional) your monthly budget in USD, to show "remaining"
 //   ANTHROPIC_ORG_LIMIT_USD (optional) your monthly budget in USD
-//   VOICEFLOW_API_KEY       Voiceflow Dialog Manager API key (VF.DM.xxxx)
-//   VOICEFLOW_PROJECT_ID    Voiceflow project id (for analytics)
+//   VOICEFLOW_API_KEY       Voiceflow API key — WORKSPACE-level (reads all projects)
+//   VOICEFLOW_PROJECT_IDS   comma-separated list of ALL project IDs to sum
 //   VOICEFLOW_CREDIT_LIMIT  (optional) monthly credit allowance from your plan
 //   RESEND_API_KEY          Resend API key (re_xxxx)
 //   RESEND_MONTHLY_LIMIT    (optional) monthly email allowance from your plan
@@ -99,34 +99,55 @@ async function getOpenAI() {
   } catch (e) { return { key: 'openai', status: 'error', error: e.message }; }
 }
 
-// --- Voiceflow: interactions this month (Analytics API) ----------------------
-// Docs: https://docs.voiceflow.com/docs/analytics
-// Note: Voiceflow's public analytics API exposes interaction/usage counts.
-// "Credits remaining" is a plan concept — set VOICEFLOW_CREDIT_LIMIT to derive it.
+// --- Voiceflow: WORKSPACE credit usage this month (sum across all projects) ---
+// Voiceflow exposes credit usage ONLY per-project (no workspace endpoint), so we
+// loop over every project ID and sum the `credit_usage` metric — that sum equals
+// the workspace credit figure shown on the Voiceflow dashboard main page.
+// Endpoint: POST https://analytics-api.voiceflow.com/v2/query/usage
+//   header  authorization: <Voiceflow API key>   (must be WORKSPACE-level so it
+//           can read every project — a single-project DM key only sees its own)
+//   body    { data: { name: 'credit_usage', filter: { projectID, startTime, endTime, limit } } }
+// Config: VOICEFLOW_API_KEY + VOICEFLOW_PROJECT_IDS (comma-separated list of all
+//         project IDs). Optional VOICEFLOW_CREDIT_LIMIT for the "remaining" bar.
 async function getVoiceflow() {
-  const key = process.env.VOICEFLOW_API_KEY;
-  const project = process.env.VOICEFLOW_PROJECT_ID;
-  if (!key || !project) return { key: 'voiceflow', status: 'not-configured' };
+  const key = envAny(['VOICEFLOW_API_KEY', 'VF_API_KEY', 'VOICEFLOW_DM_API_KEY']);
+  const idsRaw = envAny(['VOICEFLOW_PROJECT_IDS', 'VOICEFLOW_PROJECT_ID', 'VF_PROJECT_ID']);
+  if (!key || !idsRaw) return { key: 'voiceflow', status: 'not-configured' };
+
+  const ids = idsRaw.split(',').map(s => s.trim()).filter(Boolean);
+  const startTime = monthStartISO();
+  const endTime = new Date().toISOString();
+
+  // Credits for one project (follows the cursor until the last page).
+  async function projectCredits(projectID) {
+    let total = 0, cursor, pages = 0;
+    do {
+      const filter = { projectID, startTime, endTime, limit: 500 };
+      if (cursor) filter.cursor = cursor;
+      const r = await fetch('https://analytics-api.voiceflow.com/v2/query/usage', {
+        method: 'POST',
+        headers: { authorization: key, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: { name: 'credit_usage', filter } })
+      });
+      if (!r.ok) throw new Error(httpErr(r.status));
+      const j = await r.json();
+      const items = j.items || j.data || [];
+      items.forEach(it => { total += num(it.count ?? it.value); });
+      // Stop unless we got a full page (a partial page = last page).
+      cursor = (items.length >= 500 && j.cursor) ? j.cursor : undefined;
+      pages++;
+    } while (cursor && pages < 25);
+    return total;
+  }
+
   try {
-    const r = await fetch('https://analytics-api.voiceflow.com/v1/query/usage', {
-      method: 'POST',
-      headers: { Authorization: key, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        query: [{
-          name: 'interactions',
-          filter: { projectID: project, startTime: monthStartISO(), endTime: new Date().toISOString() }
-        }]
-      })
-    });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const j = await r.json();
-    // Response shape varies; pull the first numeric count we find.
-    let consumed = 0;
-    const first = (j.result || j.data || [])[0];
-    if (first) consumed = num(first.count ?? first.value ?? (first.data && first.data[0] && first.data[0].count));
-    const limit = process.env.VOICEFLOW_CREDIT_LIMIT ? num(process.env.VOICEFLOW_CREDIT_LIMIT) : null;
-    return { key: 'voiceflow', status: 'ok', unit: limit ? 'credits' : 'credits', consumed,
-             limit, periodLabel: 'צריכה מתחילת החודש' };
+    // One 401 (bad/again project) shouldn't sink the whole card — swallow per project.
+    const per = await Promise.all(ids.map(id => projectCredits(id).catch(() => 0)));
+    const consumed = per.reduce((a, b) => a + b, 0);
+    const limit = envAny(['VOICEFLOW_CREDIT_LIMIT']) ? num(envAny(['VOICEFLOW_CREDIT_LIMIT'])) : null;
+    return { key: 'voiceflow', status: 'ok', unit: 'credits', consumed, limit,
+             periodLabel: 'קרדיטים מתחילת החודש (כל הפרויקטים)',
+             note: ids.length + ' פרויקטים' };
   } catch (e) { return { key: 'voiceflow', status: 'error', error: e.message }; }
 }
 
