@@ -59,7 +59,7 @@ async function readCache(service) {
     const sbUrl = process.env.SUPABASE_URL, svc = envAny(['SUPABASE_SERVICE_ROLE_KEY']);
     if (!sbUrl || !svc) return null;
     const r = await fetchT(`${sbUrl}/rest/v1/usage_cache?service=eq.${service}&select=consumed,unit,updated_at`,
-      { headers: { apikey: svc, Authorization: `Bearer ${svc}` } }, 1800);
+      { headers: { apikey: svc, Authorization: `Bearer ${svc}` } }, 800);
     if (!r.ok) return null;
     const rows = await r.json();
     return (rows && rows[0]) ? rows[0] : null;
@@ -135,7 +135,7 @@ async function getOpenAI() {
     const u = new URL('https://api.openai.com/v1/organization/costs');
     u.searchParams.set('start_time', String(start));
     u.searchParams.set('limit', '31'); // month-to-date daily buckets — smaller = faster
-    const r = await fetchT(u, { headers: { Authorization: `Bearer ${key}` } }, 7500);
+    const r = await fetchT(u, { headers: { Authorization: `Bearer ${key}` } }, 8000);
     if (!r.ok) throw new Error(httpErr(r.status));
     const j = await r.json();
     let usd = 0;
@@ -184,7 +184,7 @@ async function getVoiceflow() {
     const endTime = new Date().toISOString();
 
     async function projectUsage(row) {
-      let credits = 0, interactions = 0, cursor, pages = 0;
+      let credits = 0, interactions = 0, cursor, pages = 0, dbg = '';
       do {
         const filter = { projectID: row.project_id, startTime, endTime, limit: 500 };
         if (cursor) filter.cursor = cursor;
@@ -195,28 +195,42 @@ async function getVoiceflow() {
         }, 6000);
         if (!rr.ok) throw new Error(httpErr(rr.status));
         const j = await rr.json();
-        const items = j.items || j.data || [];
-        items.forEach(it => { const c = num(it.count ?? it.value); credits += c; if (it.type === 'interaction') interactions += c; });
+        // Be liberal about where the rows live and what the value field is called.
+        const items = j.items || j.data || j.result || (Array.isArray(j) ? j : []);
+        if (pages === 0) dbg = 'keys=' + Object.keys(j || {}).join('|') + ' n=' + items.length;
+        items.forEach(it => {
+          const c = num(it.count ?? it.value ?? it.credits ?? it.total ?? 0);
+          credits += c;
+          if (it.type === 'interaction' || it.name === 'interactions') interactions += c;
+        });
         cursor = (items.length >= 500 && j.cursor) ? j.cursor : undefined;
         pages++;
       } while (cursor && pages < 25);
-      return { name: row.name || row.project_id, credits, interactions };
+      return { name: row.name || row.project_id, credits, interactions, dbg };
     }
 
-    const settled = await Promise.allSettled(active.map(projectUsage));
-    const items = settled.filter(s => s.status === 'fulfilled').map(s => s.value)
+    const results = await Promise.all(active.map(async (r) => {
+      try { return { ok: true, ...(await projectUsage(r)) }; }
+      catch (e) { return { ok: false, name: r.name || r.project_id, error: (e && e.message) || String(e) }; }
+    }));
+    const items = results.filter(x => x.ok).map(x => ({ name: x.name, credits: x.credits, interactions: x.interactions }))
                          .sort((a, b) => (b.interactions - a.interactions) || (b.credits - a.credits));
-    const failed = settled.filter(s => s.status === 'rejected').length;
+    const failedList = results.filter(x => !x.ok);
     if (!items.length) {
-      const w = settled.find(s => s.status === 'rejected');
-      return linkCard('כל הפרויקטים נכשלו: ' + (w ? String((w.reason && w.reason.message) || w.reason) : ''));
+      return linkCard('כל הפרויקטים נכשלו: ' + (failedList[0] ? failedList[0].error : ''));
+    }
+    const total = items.reduce((a, b) => a + b.credits, 0);
+    let note = items.length + ' פרויקטים';
+    if (failedList.length) note += ' · נכשלו: ' + failedList.map(f => f.name).join(', ');
+    // If everything came back empty, expose the raw response shape so we can see why.
+    if (total === 0) {
+      const firstOk = results.find(x => x.ok && x.dbg);
+      if (firstOk) note += ' · debug: ' + firstOk.dbg;
     }
     return {
       key: 'voiceflow', status: 'breakdown', unit: 'credits',
-      total: items.reduce((a, b) => a + b.credits, 0),
-      totalInteractions: items.reduce((a, b) => a + b.interactions, 0),
-      items, url: billingUrl, linkLabel: 'צפה בעלות ב-Voiceflow',
-      note: items.length + ' פרויקטים' + (failed ? ' · ' + failed + ' נכשלו' : '')
+      total, totalInteractions: items.reduce((a, b) => a + b.interactions, 0),
+      items, url: billingUrl, linkLabel: 'צפה בעלות ב-Voiceflow', note
     };
   } catch (e) { return linkCard(e.message); }
 }
