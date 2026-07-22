@@ -139,14 +139,22 @@ async function getVoiceflow() {
     return total;
   }
 
-  try {
-    // A failure on one project must not zero the whole card — swallow to 0.
-    const per = await Promise.all(ids.map(id => projectCredits(id).catch(() => 0)));
-    const consumed = per.reduce((a, b) => a + b, 0);
-    const limit = envAny(['VOICEFLOW_CREDIT_LIMIT']) ? num(envAny(['VOICEFLOW_CREDIT_LIMIT'])) : null;
-    return { key: 'voiceflow', status: 'ok', unit: 'credits', consumed, limit,
-             periodLabel: 'קרדיטים מתחילת החודש (כל הפרויקטים)', note: ids.length + ' פרויקטים' };
-  } catch (e) { return { key: 'voiceflow', status: 'error', error: e.message }; }
+  // Query every project, but DON'T hide failures: if they all fail (e.g. the key
+  // can't read these projects) surface the reason instead of a misleading 0.
+  const settled = await Promise.allSettled(ids.map(id => projectCredits(id)));
+  const okOnes = settled.filter(s => s.status === 'fulfilled');
+  const failed = settled.filter(s => s.status === 'rejected');
+
+  if (okOnes.length === 0) {
+    const why = failed.length ? String((failed[0].reason && failed[0].reason.message) || failed[0].reason) : 'no data';
+    return { key: 'voiceflow', status: 'error', error: 'כל הפרויקטים נכשלו: ' + why };
+  }
+
+  const consumed = okOnes.reduce((a, s) => a + s.value, 0);
+  const limit = envAny(['VOICEFLOW_CREDIT_LIMIT']) ? num(envAny(['VOICEFLOW_CREDIT_LIMIT'])) : null;
+  return { key: 'voiceflow', status: 'ok', unit: 'credits', consumed, limit,
+           periodLabel: 'קרדיטים מתחילת החודש (כל הפרויקטים)',
+           note: okOnes.length + '/' + ids.length + ' פרויקטים' + (failed.length ? ' (חלק נכשלו)' : '') };
 }
 
 // --- Resend: emails sent this month ------------------------------------------
