@@ -195,14 +195,23 @@ async function getVoiceflow() {
         }, 6000);
         if (!rr.ok) throw new Error(httpErr(rr.status));
         const j = await rr.json();
-        // Be liberal about where the rows live and what the value field is called.
-        const items = j.items || j.data || j.result || (Array.isArray(j) ? j : []);
-        if (pages === 0) dbg = 'keys=' + Object.keys(j || {}).join('|') + ' n=' + items.length;
-        items.forEach(it => {
+        // Find the rows array wherever Voiceflow put it — guarded so a non-array
+        // value can never crash the loop.
+        let items = [];
+        if (Array.isArray(j)) items = j;
+        else if (Array.isArray(j.items)) items = j.items;
+        else if (Array.isArray(j.data)) items = j.data;
+        else if (Array.isArray(j.result)) items = j.result;
+        else if (j.data && Array.isArray(j.data.items)) items = j.data.items;
+        else if (j.result && Array.isArray(j.result.items)) items = j.result.items;
+        else if (j.data && Array.isArray(j.data.data)) items = j.data.data;
+        // Capture the raw shape of the first response if we found no rows.
+        if (pages === 0 && !items.length) dbg = JSON.stringify(j).slice(0, 260);
+        for (const it of items) {
           const c = num(it.count ?? it.value ?? it.credits ?? it.total ?? 0);
           credits += c;
           if (it.type === 'interaction' || it.name === 'interactions') interactions += c;
-        });
+        }
         cursor = (items.length >= 500 && j.cursor) ? j.cursor : undefined;
         pages++;
       } while (cursor && pages < 25);
